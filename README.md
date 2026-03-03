@@ -24,7 +24,7 @@ Two state estimators run alongside the MPC to reconstruct the battery's internal
 | **EKF** (Extended Kalman Filter) | Recursive Bayesian | Fast, lightweight SOC/SOH estimation used as feedback for MPC |
 | **MHE** (Moving Horizon Estimation) | Optimization-based | Higher-accuracy SOC/SOH estimation over a 30-minute sliding window |
 
-The physical battery plant is simulated at **1-second resolution** with a nonlinear model. The base version uses a 2-state model (SOC + SOH); the thermal upgrade extends this to 3 states (SOC + SOH + Temperature) with Arrhenius-coupled degradation.
+The physical battery plant is simulated at **1-second resolution** with a nonlinear model. The base version uses a 2-state model (SOC + SOH); the thermal upgrade extends this to 3 states (SOC + SOH + Temperature) with Arrhenius-coupled degradation. The pack model further extends the plant to a multi-cell battery pack with per-cell parameter variation and active cell balancing.
 
 ---
 
@@ -170,6 +170,10 @@ battery_optimization_platform/
 │   ├── main.py                    #   Independent entry point
 │   └── ...                        #   Adds temperature state, Arrhenius degradation
 │
+├── v3_pack_model/                 # Version 3: multi-cell pack with active balancing
+│   ├── main.py                    #   Independent entry point
+│   └── ...                        #   N-cell BatteryPack wrapping BatteryPlant instances
+│
 ├── comparison/                    # Cross-version comparison infrastructure
 │   ├── metrics.py                 #   Metric computation from simulation results
 │   ├── process_results.py         #   Load .npz files and produce metrics JSON
@@ -180,6 +184,8 @@ battery_optimization_platform/
     ├── v1_baseline_metrics.json   #   Computed metrics
     ├── v2_thermal_model_results.npz
     ├── v2_thermal_model_metrics.json
+    ├── v3_pack_model_results.npz
+    ├── v3_pack_model_metrics.json
     ├── version_comparison.csv     #   All versions side-by-side
     └── version_comparison.png     #   Comparison bar charts
 ```
@@ -218,6 +224,9 @@ uv run python v1_baseline/main.py
 
 # Run the thermal model upgrade
 uv run python v2_thermal_model/main.py
+
+# Run the pack model (multi-cell with balancing)
+uv run python v3_pack_model/main.py
 ```
 
 Results (`.npz` time series and `.png` plots) are saved to `results/`.
@@ -344,7 +353,7 @@ The platform evolves through incremental, independently runnable upgrades. Each 
 |---------|------|-------------|
 | **v1** | `v1_baseline` | Frozen copy of base platform with timing instrumentation |
 | **v2** | `v2_thermal_model` | 3rd state (temperature), lumped-parameter thermal model, Arrhenius degradation coupling, temperature constraints in MPC/EMS |
-| v3 | *Planned* | Multi-cell pack model with cell balancing |
+| **v3** | `v3_pack_model` | Multi-cell battery pack (N cells in series), per-cell parameter variation, active proportional cell balancing, 8-panel visualization with cell-level plots |
 | v4 | *Planned* | Data-driven degradation (rainflow + semi-empirical) |
 | v5 | *Planned* | Robust / distributionally-robust EMS |
 | v6 | *Planned* | Real market data integration |
@@ -355,17 +364,23 @@ The platform evolves through incremental, independently runnable upgrades. Each 
 | v11 | *Planned* | Stacked-revenue ancillary services |
 | v12 | *Planned* | Day-ahead market bidding under uncertainty |
 
-### v1_baseline → v2_thermal_model Comparison
+### Version Comparison (v1 → v2 → v3)
 
-| Metric | v1_baseline | v2_thermal_model |
-|--------|------------|-----------------|
-| Total profit | $35.33 | $35.23 |
-| SOH degradation | 0.972% | 1.001% |
-| Max temperature | — | 27.8 °C |
-| Avg MPC solve time | 61 ms | 114 ms |
-| Avg estimator solve time | 46 ms | 79 ms |
+| Metric | v1_baseline | v2_thermal_model | v3_pack_model |
+|--------|------------|-----------------|---------------|
+| Total profit | $35.33 | $35.23 | $35.20 |
+| SOH degradation | 0.972% | 1.001% | 0.261% |
+| Max temperature | — | 27.8 °C | 28.0 °C |
+| Avg MPC solve time | 61 ms | 114 ms | 116 ms |
+| Avg estimator solve time | 46 ms | 79 ms | 80 ms |
+| Max SOC imbalance | — | — | 2.44% |
+| Avg SOC imbalance | — | — | 0.18% |
+| SOH spread (final) | — | — | 0.017% |
+| Balancing energy | — | — | 2.88 kWh |
 
-The thermal model introduces ~3% more degradation via Arrhenius coupling at elevated temperatures, with a proportional increase in solve times from the additional state dimension.
+**v1 → v2**: The thermal model introduces ~3% more degradation via Arrhenius coupling at elevated temperatures, with a proportional increase in solve times from the additional state dimension.
+
+**v2 → v3**: The pack model wraps 4 cells in series with manufacturing variation (capacity ±3%, resistance ±8%, degradation ±5%). EMS/MPC/EKF/MHE remain pack-level (3-state) — they see aggregated pack states while the BMS handles cell balancing transparently. Active proportional balancing reduces initial 2.4% SOC spread to ~0.2% steady-state. Solve times are unchanged since optimizer dimensions are identical to v2. Pack-level SOH reports the weakest cell (min), reflecting industry-standard weakest-link aggregation.
 
 ---
 

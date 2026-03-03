@@ -38,6 +38,13 @@ METRIC_KEYS = [
     "final_soc",
     "final_soh",
     "soh_degradation_pct",
+    # Cell-level metrics (v3+, blank for earlier versions)
+    "n_cells",
+    "max_soc_imbalance_pct",
+    "avg_soc_imbalance_pct",
+    "soh_spread_pct",
+    "max_temp_spread_degC",
+    "balancing_energy_kwh",
 ]
 
 

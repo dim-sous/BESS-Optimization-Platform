@@ -136,6 +136,36 @@ def compute_all_metrics(
         (results["soh_true"][0] - results["soh_true"][-1]) * 100.0
     )
 
+    # ------------------------------------------------------------------
+    #  Cell-level metrics  (v3+ only, optional)
+    # ------------------------------------------------------------------
+    n_cells = results.get("n_cells", 1)
+    if n_cells > 1 and "cell_socs" in results:
+        metrics["n_cells"] = int(n_cells)
+
+        soc_imb = results.get("soc_imbalance")
+        if soc_imb is not None:
+            metrics["max_soc_imbalance_pct"] = float(np.max(soc_imb) * 100)
+            metrics["avg_soc_imbalance_pct"] = float(np.mean(soc_imb) * 100)
+
+        cell_sohs = results.get("cell_sohs")
+        if cell_sohs is not None:
+            final_sohs = cell_sohs[:, -1]
+            metrics["soh_spread_pct"] = float(
+                (np.max(final_sohs) - np.min(final_sohs)) * 100
+            )
+
+        cell_temps = results.get("cell_temps")
+        if cell_temps is not None:
+            temp_spread = np.max(cell_temps, axis=0) - np.min(cell_temps, axis=0)
+            metrics["max_temp_spread_degC"] = float(np.max(temp_spread))
+
+        bal_pow = results.get("balancing_power")
+        if bal_pow is not None:
+            metrics["balancing_energy_kwh"] = float(
+                np.sum(np.abs(bal_pow)) * dt_mpc / 3600.0
+            )
+
     return metrics
 
 
