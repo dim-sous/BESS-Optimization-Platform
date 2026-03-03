@@ -2,7 +2,7 @@
 
 A complete Python platform for **optimal scheduling, real-time dispatch, and state estimation** of a grid-connected Battery Energy Storage System (BESS). It simultaneously participates in **energy arbitrage** and **frequency regulation** markets while tracking battery degradation — all in closed-loop, running at three distinct time scales.
 
-This is the same control architecture deployed in commercial utility-scale BESS installations, implemented end-to-end in ~1,500 lines of Python using CasADi and IPOPT.
+This is the same control architecture deployed in commercial utility-scale BESS installations, implemented end-to-end using CasADi and IPOPT. The platform is evolving through **incremental, versioned upgrades** toward an industry-grade digital twin — each version is independently runnable with quantitative metrics and version-to-version comparison.
 
 ---
 
@@ -24,7 +24,7 @@ Two state estimators run alongside the MPC to reconstruct the battery's internal
 | **EKF** (Extended Kalman Filter) | Recursive Bayesian | Fast, lightweight SOC/SOH estimation used as feedback for MPC |
 | **MHE** (Moving Horizon Estimation) | Optimization-based | Higher-accuracy SOC/SOH estimation over a 30-minute sliding window |
 
-The physical battery plant is simulated at **1-second resolution** with a nonlinear 2-state model that captures both energy throughput and calendar/cycling degradation.
+The physical battery plant is simulated at **1-second resolution** with a nonlinear model. The base version uses a 2-state model (SOC + SOH); the thermal upgrade extends this to 3 states (SOC + SOH + Temperature) with Arrhenius-coupled degradation.
 
 ---
 
@@ -140,29 +140,51 @@ The inner loop (1 s) applies the most recent MPC command to the plant model. Eve
 
 ```
 battery_optimization_platform/
-├── main.py                      # Entry point — runs the full pipeline
-├── pyproject.toml               # Dependencies: casadi, numpy, matplotlib, scipy
-├── config/
-│   └── parameters.py            # All tunable parameters (6 frozen dataclasses)
+├── main.py                        # Entry point — runs the base (latest) pipeline
+├── pyproject.toml                 # Dependencies: casadi, numpy, matplotlib, scipy
+│
+├── config/                        # Base platform configuration
+│   └── parameters.py              #   All tunable parameters (frozen dataclasses)
 ├── models/
-│   └── battery_model.py         # 2-state nonlinear model (CasADi + numpy plant)
+│   └── battery_model.py           #   2-state nonlinear model (CasADi + numpy plant)
 ├── ems/
-│   └── economic_ems.py          # Stochastic energy management system
+│   └── economic_ems.py            #   Stochastic energy management system
 ├── mpc/
-│   └── tracking_mpc.py          # Nonlinear tracking MPC with control blocking
+│   └── tracking_mpc.py            #   Nonlinear tracking MPC with control blocking
 ├── estimation/
-│   ├── ekf.py                   # Extended Kalman Filter
-│   └── mhe.py                   # Moving Horizon Estimation
+│   ├── ekf.py                     #   Extended Kalman Filter
+│   └── mhe.py                     #   Moving Horizon Estimation
 ├── simulation/
-│   └── simulator.py             # Multi-rate simulation coordinator
+│   └── simulator.py               #   Multi-rate simulation coordinator
 ├── data/
-│   ├── price_generator.py       # Stochastic price scenario generator
-│   └── prices.csv               # Historical price data (backward compatible)
-└── visualization/
-    └── plot_results.py          # 6-panel result figure
+│   ├── price_generator.py         #   Stochastic price scenario generator
+│   └── prices.csv                 #   Historical price data
+├── visualization/
+│   └── plot_results.py            #   Result figure generation
+│
+├── v1_baseline/                   # Version 1: frozen baseline (2-state, timing instrumented)
+│   ├── main.py                    #   Independent entry point
+│   └── ...                        #   Self-contained copy of all modules
+│
+├── v2_thermal_model/              # Version 2: 3-state thermal model upgrade
+│   ├── main.py                    #   Independent entry point
+│   └── ...                        #   Adds temperature state, Arrhenius degradation
+│
+├── comparison/                    # Cross-version comparison infrastructure
+│   ├── metrics.py                 #   Metric computation from simulation results
+│   ├── process_results.py         #   Load .npz files and produce metrics JSON
+│   └── compare_versions.py        #   Side-by-side table, CSV, and bar chart
+│
+└── results/                       # Simulation outputs (auto-generated)
+    ├── v1_baseline_results.npz    #   Raw time series
+    ├── v1_baseline_metrics.json   #   Computed metrics
+    ├── v2_thermal_model_results.npz
+    ├── v2_thermal_model_metrics.json
+    ├── version_comparison.csv     #   All versions side-by-side
+    └── version_comparison.png     #   Comparison bar charts
 ```
 
-Each subfolder contains its own `README.md` with full mathematical formulations.
+Each base subfolder contains its own `README.md` with full mathematical formulations.
 
 ---
 
@@ -178,40 +200,61 @@ Each subfolder contains its own `README.md` with full mathematical formulations.
 ```bash
 cd battery_optimization_platform
 uv sync
+```
+
+Run the base platform:
+
+```bash
 uv run python main.py
 ```
 
-Or with pip:
+### Running Individual Versions
+
+Each version is independently runnable from the repository root:
 
 ```bash
-pip install casadi numpy matplotlib scipy
-python main.py
+# Run the frozen baseline
+uv run python v1_baseline/main.py
+
+# Run the thermal model upgrade
+uv run python v2_thermal_model/main.py
+```
+
+Results (`.npz` time series and `.png` plots) are saved to `results/`.
+
+### Comparing Versions
+
+After running one or more versions, generate a side-by-side comparison:
+
+```bash
+# Compute metrics from saved .npz files
+uv run python -m comparison.process_results
+
+# Print comparison table, save CSV and bar chart
+uv run python -m comparison.compare_versions
 ```
 
 ### Expected Output
 
-The simulation takes approximately 5-10 minutes (86,400 plant steps with 1,440 optimization solves). Console output shows:
+Each simulation takes approximately 5-10 minutes (86,400 plant steps with 1,440 optimization solves). Console output shows:
 
 ```
 ==============================================================
-  BESS HIERARCHICAL CONTROL PLATFORM
+  BESS HIERARCHICAL CONTROL PLATFORM  [v2_thermal_model]
 ==============================================================
   Battery:    200 kWh / 100 kW
   SOC range:  [0.10, 0.90]
   ...
-EMS solve at t=0 s (hour 0), SOC=0.500, SOH=1.000000
-MPC step 0: u=[...] SOC_ekf=0.500 SOH_ekf=1.000000
-...
 ==============================================================
-  RESULTS SUMMARY
+  RESULTS SUMMARY  [v2_thermal_model]
 ==============================================================
-  Total profit:     $XX.XX
-  SOH degradation:  X.XXXX%
-  Final SOC:        0.XXXX
+  Total profit:     $35.23
+  SOH degradation:  1.0009%
+  Final SOC:        0.1361
+  Final Temp:       25.42 degC
+  Avg MPC solve:    114.3 ms
 ==============================================================
 ```
-
-A `results.png` figure is saved to the project root (see below).
 
 ---
 
@@ -290,6 +333,39 @@ The EMS enforces that the first-stage decisions (current hour) must be identical
 
 ### Degradation as a Soft Penalty
 Battery degradation is included as a cost term rather than a hard constraint on SOH. This lets the optimizer make principled trade-offs: cycle the battery more aggressively when revenue is high, and conserve it when margins are thin.
+
+---
+
+## Version Upgrades
+
+The platform evolves through incremental, independently runnable upgrades. Each version adds one major capability while preserving everything from previous versions.
+
+| Version | Name | Key Addition |
+|---------|------|-------------|
+| **v1** | `v1_baseline` | Frozen copy of base platform with timing instrumentation |
+| **v2** | `v2_thermal_model` | 3rd state (temperature), lumped-parameter thermal model, Arrhenius degradation coupling, temperature constraints in MPC/EMS |
+| v3 | *Planned* | Multi-cell pack model with cell balancing |
+| v4 | *Planned* | Data-driven degradation (rainflow + semi-empirical) |
+| v5 | *Planned* | Robust / distributionally-robust EMS |
+| v6 | *Planned* | Real market data integration |
+| v7 | *Planned* | Frequency regulation signal simulation |
+| v8 | *Planned* | Multi-objective Pareto front EMS |
+| v9 | *Planned* | Digital twin observer (UKF + particle filter) |
+| v10 | *Planned* | Hardware-in-the-loop interface |
+| v11 | *Planned* | Stacked-revenue ancillary services |
+| v12 | *Planned* | Day-ahead market bidding under uncertainty |
+
+### v1_baseline → v2_thermal_model Comparison
+
+| Metric | v1_baseline | v2_thermal_model |
+|--------|------------|-----------------|
+| Total profit | $35.33 | $35.23 |
+| SOH degradation | 0.972% | 1.001% |
+| Max temperature | — | 27.8 °C |
+| Avg MPC solve time | 61 ms | 114 ms |
+| Avg estimator solve time | 46 ms | 79 ms |
+
+The thermal model introduces ~3% more degradation via Arrhenius coupling at elevated temperatures, with a proportional increase in solve times from the additional state dimension.
 
 ---
 

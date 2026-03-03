@@ -1,0 +1,158 @@
+"""v2_thermal_model — 3-state (SOC, SOH, Temperature) BESS control platform.
+
+Adds lumped-parameter thermal dynamics with Arrhenius degradation coupling.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import pathlib
+import sys
+
+import numpy as np
+
+VERSION_TAG = "v2_thermal_model"
+
+# Ensure version folder root is importable (and ONLY this folder)
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.parameters import (
+    BatteryParams,
+    EKFParams,
+    EMSParams,
+    MHEParams,
+    MPCParams,
+    ThermalParams,
+    TimeParams,
+)
+from data.price_generator import PriceGenerator
+from simulation.simulator import MultiRateSimulator
+from visualization.plot_results import plot_results
+
+# ---------------------------------------------------------------------------
+#  Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(name)-24s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+#  Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Orchestrate the hierarchical BESS control simulation with thermal model."""
+    # ---- Configuration ----
+    bp = BatteryParams()
+    tp = TimeParams()
+    ep = EMSParams()
+    mp = MPCParams()
+    ekf_p = EKFParams()
+    mhe_p = MHEParams()
+    thp = ThermalParams()
+
+    logger.info("=" * 62)
+    logger.info("  BESS HIERARCHICAL CONTROL PLATFORM  [%s]", VERSION_TAG)
+    logger.info("=" * 62)
+    logger.info("  Battery:    %d kWh / %d kW", bp.E_nom_kwh, bp.P_max_kw)
+    logger.info("  SOC range:  [%.2f, %.2f]", bp.SOC_min, bp.SOC_max)
+    logger.info("  SOH init:   %.4f", bp.SOH_init)
+    logger.info("  alpha_deg:  %.2e  [1/(kW*s)]", bp.alpha_deg)
+    logger.info("  --- Thermal ---")
+    logger.info("  R_internal: %.4f Ohm", thp.R_internal)
+    logger.info("  C_thermal:  %.0f J/K", thp.C_thermal)
+    logger.info("  h_cool:     %.0f W/K", thp.h_cool)
+    logger.info("  T_ambient:  %.1f degC", thp.T_ambient)
+    logger.info("  T_max:      %.1f degC", thp.T_max)
+    logger.info("  V_nominal:  %.0f V", thp.V_nominal)
+    logger.info("  E_a:        %.0f J/mol", thp.E_a)
+    logger.info("  --- Timing ---")
+    logger.info("  dt_ems:     %d s", tp.dt_ems)
+    logger.info("  dt_mpc:     %d s", tp.dt_mpc)
+    logger.info("  dt_sim:     %d s", tp.dt_sim)
+    logger.info("  Sim hours:  %d h", tp.sim_hours)
+    logger.info("  EMS:  N=%d  scenarios=%d", ep.N_ems, ep.n_scenarios)
+    logger.info("  MPC:  N=%d  Nc=%d", mp.N_mpc, mp.Nc_mpc)
+    logger.info("  MHE:  N=%d", mhe_p.N_mhe)
+    logger.info("=" * 62)
+
+    # ---- Price scenarios ----
+    n_hours_total = int(tp.sim_hours) + ep.N_ems
+    price_gen = PriceGenerator(seed=42)
+    energy_scen, reg_scen, probs = price_gen.generate_scenarios(
+        n_hours=n_hours_total,
+        n_scenarios=ep.n_scenarios,
+    )
+    logger.info(
+        "Price scenarios generated: %d scenarios x %d hours",
+        energy_scen.shape[0],
+        energy_scen.shape[1],
+    )
+
+    # ---- Multi-rate simulation ----
+    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p, thp)
+    results = simulator.run(energy_scen, reg_scen, probs)
+
+    # ---- Visualisation ----
+    results_dir = PROJECT_ROOT.parent / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = str(results_dir / f"{VERSION_TAG}_results.png")
+    plot_results(results, bp, thp, save_path=plot_path)
+
+    # ---- Save raw results for comparison pipeline ----
+    array_data = {}
+    scalar_data = {}
+    for k, v in results.items():
+        if isinstance(v, np.ndarray):
+            array_data[k] = v
+        elif isinstance(v, (int, float, str, bool)):
+            scalar_data[k] = v
+
+    npz_path = results_dir / f"{VERSION_TAG}_results.npz"
+    np.savez(npz_path, **array_data)
+
+    scalars_path = results_dir / f"{VERSION_TAG}_scalars.json"
+    with open(scalars_path, "w") as f:
+        json.dump(scalar_data, f, indent=2)
+
+    logger.info("Results saved to %s", npz_path)
+
+    # ---- Summary ----
+    print()
+    print("=" * 62)
+    print(f"  RESULTS SUMMARY  [{VERSION_TAG}]")
+    print("=" * 62)
+    print(f"  Battery:          {bp.E_nom_kwh:.0f} kWh / {bp.P_max_kw:.0f} kW")
+    print(f"  Simulation:       {tp.sim_hours:.0f} hours")
+    print(f"  Total profit:     ${results['total_profit']:.2f}")
+    print(f"  SOH degradation:  {results['soh_degradation']*100:.4f}%")
+    print(f"  Final SOC:        {results['soc_true'][-1]:.4f}")
+    print(f"  Final SOH:        {results['soh_true'][-1]:.6f}")
+    print(f"  Final Temp:       {results['temp_true'][-1]:.2f} degC")
+    print(f"  Max  Temp:        {np.max(results['temp_true']):.2f} degC")
+    print(f"  EKF final SOC:    {results['soc_ekf'][-1]:.4f}")
+    print(f"  EKF final SOH:    {results['soh_ekf'][-1]:.6f}")
+    print(f"  EKF final T:      {results['temp_ekf'][-1]:.2f} degC")
+    print(f"  MHE final SOC:    {results['soc_mhe'][-1]:.4f}")
+    print(f"  MHE final SOH:    {results['soh_mhe'][-1]:.6f}")
+    print(f"  MHE final T:      {results['temp_mhe'][-1]:.2f} degC")
+    mpc_t = results.get("mpc_solve_times")
+    if mpc_t is not None and len(mpc_t) > 0:
+        print(f"  Avg MPC solve:    {np.mean(mpc_t)*1000:.1f} ms")
+        print(f"  Max MPC solve:    {np.max(mpc_t)*1000:.1f} ms")
+    est_t = results.get("est_solve_times")
+    if est_t is not None and len(est_t) > 0:
+        print(f"  Avg Est solve:    {np.mean(est_t)*1000:.1f} ms")
+    print("=" * 62)
+
+
+if __name__ == "__main__":
+    main()
