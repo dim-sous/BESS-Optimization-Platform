@@ -349,20 +349,21 @@ Battery degradation is included as a cost term rather than a hard constraint on 
 
 The platform evolves through incremental, independently runnable upgrades. Each version adds one major capability while preserving everything from previous versions.
 
-| Version | Name | Key Addition |
-|---------|------|-------------|
-| **v1** | `v1_baseline` | Frozen copy of base platform with timing instrumentation |
-| **v2** | `v2_thermal_model` | 3rd state (temperature), lumped-parameter thermal model, Arrhenius degradation coupling, temperature constraints in MPC/EMS |
-| **v3** | `v3_pack_model` | Multi-cell battery pack (N cells in series), per-cell parameter variation, active proportional cell balancing, 8-panel visualization with cell-level plots |
-| v4 | *Planned* | Data-driven degradation (rainflow + semi-empirical) |
-| v5 | *Planned* | Robust / distributionally-robust EMS |
-| v6 | *Planned* | Real market data integration |
-| v7 | *Planned* | Frequency regulation signal simulation |
-| v8 | *Planned* | Multi-objective Pareto front EMS |
-| v9 | *Planned* | Digital twin observer (UKF + particle filter) |
-| v10 | *Planned* | Hardware-in-the-loop interface |
-| v11 | *Planned* | Stacked-revenue ancillary services |
-| v12 | *Planned* | Day-ahead market bidding under uncertainty |
+| Version | Name | Key Addition | Difficulty |
+|---------|------|-------------|------------|
+| **v1** | `v1_baseline` | Frozen copy of base platform with timing instrumentation | — |
+| **v2** | `v2_thermal_model` | 3rd state (temperature), lumped-parameter thermal model, Arrhenius degradation coupling, temperature constraints in MPC/EMS | LOW |
+| **v3** | `v3_pack_model` | Multi-cell battery pack (N cells in series), per-cell parameter variation, active proportional cell balancing, 8-panel visualization with cell-level plots | LOW |
+| v4 | `v4_electrical_rc_model` | 2RC equivalent circuit model, voltage states (V_rc1, V_rc2), terminal voltage measurement, OCV(SOC) lookup | LOW-MEDIUM |
+| v5 | `v5_ukf_estimator` | Unscented Kalman Filter replacing EKF, sigma points, unscented transform | MEDIUM |
+| v6 | `v6_parameter_estimation` | Joint state + parameter estimation via MHE, online R_internal/capacity/efficiency identification | MEDIUM |
+| v7 | `v7_acados_nmpc` | Real-time NMPC using ACADOS, multiple shooting, Real-Time Iteration (RTI) | HIGH |
+| v8 | `v8_degradation_aware_mpc` | SOH in MPC state, degradation cost in MPC objective, SOH floor constraint | HIGH |
+| v9 | `v9_disturbance_forecast_uncertainty` | Stochastic price forecasts in MPC, scenario-based MPC, robustness comparison | HIGH |
+| v10 | `v10_measurement_delay` | Measurement delay, actuator delay, random communication latency | HIGH |
+| v11 | `v11_multi_battery_system` | Multiple batteries with local MPC and central EMS coordination | VERY HIGH |
+| v12 | `v12_grid_inverter_model` | Grid-connected inverter dynamics (id, iq, Vdc), power converter model, reactive power | VERY HIGH |
+| v13 | `v13_market_bidding` | Day-ahead bidding, reserve bidding, market participation optimization | VERY HIGH |
 
 ### Version Comparison (v1 → v2 → v3)
 
