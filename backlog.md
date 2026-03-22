@@ -148,7 +148,7 @@ Key observations from comparison plots:
 
 ---
 
-### Stage 4: Stress Testing — PENDING
+### Stage 4: Stress Testing — PASS
 
 | # | Test | Result | Key Finding |
 |---|------|--------|-------------|
