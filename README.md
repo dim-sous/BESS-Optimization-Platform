@@ -43,9 +43,6 @@ Each version adds one major capability, passes a **4-stage gate** (validation, e
 | **v3** Pack Model | 4-cell pack, active balancing | SOC spread 2.4% -> 0.2% |
 | **v4** Electrical RC | 2RC circuit, NMC OCV, voltage measurement | **47% better SOC estimation** |
 
-### v4 Highlight: Voltage-Aided Estimation
-
-The 2RC equivalent circuit model adds terminal voltage as a measurement channel. The OCV(SOC) relationship gives the EKF a second independent observation of SOC beyond coulomb counting -- cutting SOC estimation error from 0.22% to 0.12%. This is how real battery management systems work.
 
 ## Quick Start
 

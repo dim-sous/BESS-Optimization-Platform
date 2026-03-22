@@ -197,7 +197,8 @@ def build_casadi_dynamics(
     kappa = ca.exp(thp.E_a / thp.R_gas * (1.0 / T_ref_K - 1.0 / T_K))
 
     P_total = P_chg + P_dis + ca.fabs(P_reg)          # total power throughput [kW]
-    dSOH_dt = -bp.alpha_deg * kappa * P_total
+    # Scale by 1/n_modules: each cell in the series pack handles P_total/n
+    dSOH_dt = -bp.alpha_deg * kappa * P_total / n_modules
 
     # ---- Current from quadratic solve (2RC model) ----
     OCV_pack = ocv_pack_casadi(SOC, elp, n_modules)
@@ -257,7 +258,8 @@ def build_casadi_dynamics_3state(
     T_K = T + 273.15
     kappa = ca.exp(thp.E_a / thp.R_gas * (1.0 / T_ref_K - 1.0 / T_K))
     P_total = P_chg + P_dis + ca.fabs(P_reg)
-    dSOH_dt = -bp.alpha_deg * kappa * P_total
+    # Scale by 1/n_modules: each cell in the series pack handles P_total/n
+    dSOH_dt = -bp.alpha_deg * kappa * P_total / n_modules
 
     # ---- Thermal dynamics (OCV-based current, V_rc=0 at hourly resolution) ----
     OCV_pack = ocv_pack_casadi(SOC, elp, n_modules)
