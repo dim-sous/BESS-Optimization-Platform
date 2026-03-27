@@ -16,7 +16,7 @@ This platform answers it end-to-end:
 - **Multi-cell pack modeling** -- per-cell parameter variation with active balancing, weakest-link SOH tracking
 - **High-fidelity plant** -- 2RC equivalent circuit with NMC OCV polynomial, Arrhenius degradation, and thermal dynamics
 
-**Current scope:** The platform optimizes regulation **capacity commitment** (how much to bid) and enforces feasibility constraints. Real-time regulation **delivery** (following stochastic activation signals from the grid) is the target of v5.
+**Current scope:** v1–v4 are frozen (gated). v5 is in early development, adding real-time regulation **delivery** with stochastic activation signals and a PI controller layer to demonstrate MPC necessity.
 
 ## Architecture
 
@@ -37,12 +37,13 @@ Each version adds one major capability, passes a **4-stage gate** (validation, e
 | **v2** Thermal Model | Temperature state, Arrhenius degradation coupling | Frozen |
 | **v3** Pack Model | 4-cell pack, active cell balancing | Frozen |
 | **v4** Electrical RC | 2RC equivalent circuit, NMC OCV, voltage measurement | Frozen |
+| **v5** Regulation Activation | FCR delivery, PI controller, MPC necessity demonstration | In development |
 
 ## Quick Start
 
 ```bash
 uv sync                                       # install dependencies
-uv run python v4_electrical_rc_model/main.py   # run latest version
+uv run python v5_regulation_activation/main.py # run latest version (v5)
 ```
 
 Each version is independently runnable. Results go to `results/`.

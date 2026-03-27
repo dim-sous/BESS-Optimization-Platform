@@ -1,159 +1,111 @@
-# v4_electrical_rc_model — 2RC Equivalent Circuit with NMC OCV Polynomial
+# v5_regulation_activation — FCR Regulation Delivery with MPC Necessity
 
-Extends the 3-state thermal model to a **5-state model** by adding two RC voltage states:
+Extends the v4 electrical model with **real-time frequency containment reserve (FCR) regulation delivery**. The grid sends stochastic activation signals at 4-second resolution that the BESS must follow while maintaining SOC, thermal, and voltage constraints.
 
-    x = [SOC, SOH, T, V_rc1, V_rc2]
+Adds a fast **PI controller** between MPC and the plant, creating a 4-level control hierarchy:
 
-Terminal voltage `V_term = OCV(SOC) - V_rc1 - V_rc2 - I*R0` is now explicitly modeled and measured, providing a new observation channel for state estimation via voltage feedback.
+    EMS (3600s) → MPC (60s) → PI (4s) → Plant (4s)
 
-## What Changed from v3
+## What Changed from v4
 
-| Component | v3_pack_model | v4_electrical_rc_model |
-|-----------|--------------|----------------------|
-| **State vector** | 3 states: `[SOC, SOH, T]` | 5 states: `[SOC, SOH, T, V_rc1, V_rc2]` |
-| **Measurements** | 2: `[SOC, T]` | 3: `[SOC, T, V_term]` |
-| **Electrical model** | Simple `I = P/V_nom` | 2RC circuit with OCV polynomial + quadratic current solve |
-| **OCV** | Not modeled | 7th-order NMC polynomial: 3.0 V (SOC=0) to 4.19 V (SOC=1) |
-| **Voltage constraints** | None | Soft V_term constraints in MPC (V_min_pack, V_max_pack) |
-| **EKF** | 3-state, 2-measurement | 5-state, 3-measurement (nonlinear H via OCV) |
-| **MHE** | 3-state, 2-measurement | 5-state, 3-measurement with V_rc process weights |
-| **MPC** | 3-state | 3-state (V_rc omitted for tractability — see design note) |
-| **Plant** | `BatteryPack` with simple current | `BatteryPack` with 2RC dynamics per cell |
-| **Visualization** | 4x2 layout | 2x2 layout: SOC, voltage, SOH+RC, power+price |
-| **Simulation dt** | 1 s | 5 s (RK4-stable for tau_min=10 s) |
-| **Stress tests** | 10 tests | 14 tests (adds OCV, RC step response, solver robustness, voltage limits) |
+| Component | v4_electrical_rc_model | v5_regulation_activation |
+|-----------|----------------------|--------------------------|
+| **Control hierarchy** | EMS → MPC → Plant | EMS → MPC → PI → Plant |
+| **Simulation dt** | 5 s | 4 s (matches activation signal resolution) |
+| **Activation signals** | Not modeled | Stochastic ±P_reg at 4s resolution |
+| **PI controller** | None | Tracks activation signal with SOC safety limits |
+| **Revenue model** | Arbitrage + capacity bidding | Arbitrage + capacity + delivery revenue − penalties |
+| **Strategy comparison** | Single strategy | `--strategy full\|ems_only\|no_regulation` |
+| **EMS** | Arbitrage + capacity commitment | Adds SOC headroom margin for regulation delivery |
+| **MPC** | SOC tracking | Adds headroom band to maintain regulation capacity |
 
-**Unchanged**: Pack architecture (4 cells, active balancing), price generation.
+**Unchanged**: 5-state model (SOC, SOH, T, V_rc1, V_rc2), 2RC circuit, OCV polynomial, pack architecture (4 cells, active balancing), EKF/MHE estimation.
 
-## 2RC Equivalent Circuit Model
+## Key Concept: MPC Necessity
 
-```
-    I (>0 discharge)
-    ─────┬───[R0]───┬───[R1]───┬───[R2]───┬─────
-         │          │    ║     │    ║     │
-         │          │   [C1]   │   [C2]   │
-       V_term       │    ║     │    ║     │
-         │          └──────────┘──────────┘
-    ─────┴─────────────────────────────────┴─────
-                         OCV(SOC)
+This version demonstrates that MPC is **indispensable** for real-time grid service delivery:
 
-V_term = OCV(SOC) - V_rc1 - V_rc2 - I * R0
+- **EMS-only** dispatch cannot react to stochastic activation signals → SOC constraint violations, delivery failures, penalties
+- **EMS+MPC** provides closed-loop feedback → smooth delivery, constraint satisfaction, higher net profit
 
-RC dynamics:
-  dV_rc1/dt = -V_rc1 / tau_1  +  I / C1    (fast transient,  tau_1 = 10 s)
-  dV_rc2/dt = -V_rc2 / tau_2  +  I / C2    (slow diffusion,  tau_2 = 400 s)
-```
+Run the formal comparison with `--strategy ems_only` vs `--strategy full`.
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `R0` | 0.005 Ohm | Series resistance (pack-level) |
-| `R1` | 0.003 Ohm | Charge-transfer resistance |
-| `tau_1` | 10 s | Fast time constant (C1 = 3333 F) |
-| `R2` | 0.002 Ohm | Diffusion resistance |
-| `tau_2` | 400 s | Slow time constant (C2 = 200000 F) |
-| `R_total` | 0.010 Ohm | R0 + R1 + R2 (matches v3 R_internal) |
+## Regulation Delivery Model
 
-## NMC OCV Polynomial
+The grid sends a normalized activation signal `a(t) ∈ [-1, 1]` at 4-second intervals. The BESS must deliver:
 
-7th-order polynomial fitted to NMC cell data, evaluated via Horner's method:
+    P_reg(t) = a(t) × P_committed
 
-```
-OCV_cell(SOC) = a0 + a1*SOC + a2*SOC^2 + ... + a7*SOC^7
-```
+where `P_committed` is the capacity bid from the EMS (hourly). A PI controller tracks this signal:
 
-Range: ~3.0 V (SOC=0) to ~4.19 V (SOC=1), monotonically increasing.
+    P_pi(t) = Kp × e(t) + Ki × ∫e(τ)dτ
 
-Pack-level OCV: `OCV_pack(SOC) = n_series_cells * n_modules * OCV_cell(SOC)`, where `n_series_cells=54` and `n_modules=4` (216 cells total, ~800 V nominal).
+with SOC safety margins that curtail delivery near SOC limits to prevent constraint violations.
 
-## Current Computation
+## Revenue Structure
 
-Current is derived from a quadratic equation (power = voltage x current):
+| Component | Description |
+|-----------|-------------|
+| Energy arbitrage | Buy low / sell high on day-ahead prices |
+| Capacity revenue | Payment for committed regulation capacity ($/kW/h) |
+| Delivery revenue | Payment for energy delivered during activation ($/kWh) |
+| Penalty cost | Penalty for under-delivery vs committed capacity |
+| Degradation cost | Battery wear from all power flows |
 
-```
-R0 * I^2 - V_oc_eff * I + P_net * 1000 = 0
+## Control Strategies
 
-where V_oc_eff = OCV(SOC) - V_rc1 - V_rc2
-      P_net = P_dis - P_chg  [kW]
-```
-
-The physically meaningful root (smaller |I|) is selected. Falls back to `I = P_net*1000 / V_oc_eff` when the discriminant is negative.
-
-## Hierarchical Estimation-Control Separation
-
-A key design decision in v4:
-
-- **EKF/MHE** use the full **5-state** model — the voltage measurement provides additional SOC observability through the OCV curve slope
-- **MPC/EMS** use a **3-state** model (SOC, SOH, T) — V_rc dynamics are omitted because their effect on control is negligible (V_rc1_max = I*R1 = 0.375 V at rated current, ~0.05% of pack voltage)
-
-This is standard hierarchical estimation-control separation: the estimator uses all available measurements for accuracy, while the controller uses a reduced model for tractability.
-
-## Pack Voltage Limits
-
-| Parameter | Value | Derivation |
-|-----------|-------|------------|
-| `V_min_pack` | 604.8 V | 2.8 V/cell x 54 cells x 4 modules |
-| `V_max_pack` | 918.0 V | 4.25 V/cell x 54 cells x 4 modules |
-
-Enforced as soft constraints in MPC with penalty weight `slack_penalty_volt = 1e5`.
+| Strategy | Description |
+|----------|-------------|
+| `full` | EMS + MPC + PI — full hierarchical control |
+| `ems_only` | EMS dispatch only, no MPC feedback — demonstrates MPC necessity |
+| `no_regulation` | Arbitrage only, no regulation participation |
 
 ## Module Structure
 
 ```
-v4_electrical_rc_model/
-├── main.py                   # Entry point: VERSION_TAG="v4_electrical_rc_model"
+v5_regulation_activation/
+├── main.py                       # Entry point with --strategy and --mhe flags
 ├── config/
-│   └── parameters.py         # All v3 params + ElectricalParams (2RC, OCV, voltage limits)
+│   └── parameters.py             # All v4 params + PIParams, RegulationParams, Strategy
 ├── models/
-│   └── battery_model.py      # 5-state CasADi + numpy dynamics, OCV polynomial, quadratic solver
+│   └── battery_model.py          # 5-state CasADi + numpy dynamics (from v4)
 ├── ems/
-│   └── economic_ems.py       # 3-state hourly planning + regulation delivery constraints
+│   └── economic_ems.py           # Hourly planning with SOC headroom for regulation
 ├── mpc/
-│   └── tracking_mpc.py       # 3-state MPC with OCV-based current + soft voltage constraints
+│   └── tracking_mpc.py           # SOC tracking with headroom band
+├── pi/
+│   └── regulation_pi.py          # Fast PI controller for activation signal tracking
 ├── estimation/
-│   ├── ekf.py                # 5-state, 3-measurement EKF (nonlinear H via OCV)
-│   └── mhe.py                # 5-state, 3-measurement MHE with V_rc process weights
+│   ├── ekf.py                    # 5-state, 3-measurement EKF (from v4)
+│   └── mhe.py                    # 5-state MHE (optional, --mhe flag)
 ├── simulation/
-│   └── simulator.py          # Multi-rate coordinator with 2RC pack plant
-├── visualization/
-│   └── plot_results.py       # 2x2 layout: SOC, voltage, SOH+RC, power+price
+│   └── simulator.py              # 4-level multi-rate coordinator
 ├── data/
-│   └── price_generator.py    # Unchanged from v3
-└── stress_test.py            # 14-test stress suite with electrical-specific tests
+│   ├── price_generator.py        # Stochastic price scenarios
+│   ├── activation_generator.py   # Stochastic regulation activation signals
+│   └── real_price_loader.py      # Load real market price data
+├── revenue/
+│   └── regulation_revenue.py     # Delivery revenue, penalty, and score calculation
+├── visualization/
+│   └── plot_results.py           # Results plotting with regulation-specific panels
+└── stress_test.py                # Stress test suite
 ```
 
 ## Running
 
 ```bash
 # From repository root
-uv run python v4_electrical_rc_model/main.py
+uv run python v5_regulation_activation/main.py                    # full strategy (default)
+uv run python v5_regulation_activation/main.py --strategy ems_only
+uv run python v5_regulation_activation/main.py --strategy no_regulation
+
+# With MHE estimator (slower)
+uv run python v5_regulation_activation/main.py --mhe
 
 # Run stress tests
-uv run python v4_electrical_rc_model/stress_test.py
-
-# Compare with v1, v2, v3
-uv run python -m comparison.process_results
-uv run python -m comparison.compare_versions
+uv run python v5_regulation_activation/stress_test.py
 ```
 
-## Stress Tests
+## Status
 
-14 tests covering all v3 tests plus 4 new electrical-specific tests:
-
-| # | Test | Category |
-|---|------|----------|
-| 1 | Max power continuous cycling (100 kW, 4h) | Thermal + electrical |
-| 2 | High ambient temperature (40 degC) | Arrhenius coupling |
-| 3 | SOC boundary saturation | SOC limits |
-| 4 | Rapid power reversals (60s cycle) | Transient response |
-| 5 | Thermal decay to ambient | Thermal dynamics |
-| 6 | EKF convergence from bad initial estimate (5-state) | Estimation |
-| 7 | MPC temperature constraint enforcement | Control safety |
-| 8 | Cell imbalance recovery (large initial SOC spread) | Pack balancing |
-| 9 | Balancing saturation (extreme cell variation) | Pack balancing |
-| 10 | Weakest-cell degradation | Pack degradation |
-| 11 | OCV monotonicity verification | **New** — electrical |
-| 12 | RC step response (tau_1 and tau_2 settling) | **New** — electrical |
-| 13 | Quadratic solver robustness (extreme inputs) | **New** — electrical |
-| 14 | Voltage at SOC extremes (V_term within pack limits) | **New** — electrical |
-
-Results plotted to `results/v4_electrical_rc_model_stress_tests.png`.
+**Early development** — not yet gated. See `backlog.md` for gate process.
