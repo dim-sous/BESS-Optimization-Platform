@@ -1,6 +1,6 @@
 # Energy Storage Optimization Platform
 
-A production-grade Python platform for **optimal scheduling, real-time dispatch, and state estimation** of grid-connected battery energy storage systems (BESS). Simultaneously participates in **energy arbitrage** and **frequency regulation** markets while actively managing battery degradation.
+A production-grade Python platform for **optimal scheduling, real-time dispatch, and state estimation** of grid-connected battery energy storage systems (BESS). Optimizes **energy arbitrage** and **regulation capacity bidding** while actively managing battery degradation.
 
 Built with the same hierarchical control architecture deployed in commercial utility-scale installations. Evolves through **incremental, gated upgrades** from baseline to industry-grade digital twin.
 
@@ -10,59 +10,42 @@ Every BESS operator faces the same question: *Given uncertain market prices, how
 
 This platform answers it end-to-end:
 
-- **Economic scheduling** -- stochastic 24-hour optimization across 5 price scenarios, balancing arbitrage revenue, regulation capacity payments, and degradation costs
-- **Real-time dispatch** -- nonlinear model predictive control executing the schedule at 1-minute resolution, enforcing thermal and SOC constraints
-- **State estimation** -- EKF and MHE estimators reconstructing battery internals (SOC, SOH, temperature, voltage) from noisy sensors
+- **Economic scheduling** -- stochastic 24-hour optimization across multiple price scenarios, jointly optimizing arbitrage revenue, regulation capacity payments, and degradation costs
+- **Real-time dispatch** -- nonlinear model predictive control tracking the economic schedule while enforcing SOC, thermal, and voltage constraints
+- **State estimation** -- EKF reconstructing battery internals (SOC, SOH, temperature, RC voltages) from noisy sensors
 - **Multi-cell pack modeling** -- per-cell parameter variation with active balancing, weakest-link SOH tracking
+- **High-fidelity plant** -- 2RC equivalent circuit with NMC OCV polynomial, Arrhenius degradation, and thermal dynamics
+
+**Current scope:** The platform optimizes regulation **capacity commitment** (how much to bid) and enforces feasibility constraints. Real-time regulation **delivery** (following stochastic activation signals from the grid) is the target of v5.
 
 ## Architecture
 
 ```
- Stochastic Prices ──► EMS (hourly)  ──► MPC (1 min)  ──► Battery Plant (5s)
-                       24h horizon        60-step            4-cell pack
-                       5 scenarios        warm-started       2RC circuit
-                                          ◄── EKF/MHE ◄──  voltage + SOC + T
-                                              5-state       measurements
+ Stochastic Prices ──► EMS (hourly)  ──► MPC  ──► Battery Plant
+                       24h horizon       warm-started   multi-cell pack
+                       N scenarios       constrained    2RC circuit
+                                         ◄── EKF ◄──   noisy measurements
 ```
-
-| Layer | Time Scale | Model | Purpose |
-|-------|-----------|-------|---------|
-| EMS | 1 hour | 3-state (SOC, SOH, T) | Economic planning |
-| MPC | 1 minute | 3-state + OCV thermal | Real-time tracking |
-| EKF/MHE | 1 minute | 5-state (+ V_rc1, V_rc2) | State estimation |
-| Plant | 5 seconds | 5-state per cell, 2RC circuit | High-fidelity simulation |
 
 ## Versioned Upgrades
 
-Each version adds one major capability, passes a **4-stage gate** (validation, evaluation, comparison, stress testing), and is frozen before the next begins.
+Each version adds one major capability, passes a **4-stage gate** (validation, evaluation, comparison, stress testing), and is frozen before the next begins. See each version's `README.md` for mathematical formulations, metrics, and implementation details.
 
-| Version | What It Adds | Key Result |
-|---------|-------------|------------|
-| **v1** Baseline | 2-state EMS + MPC + EKF/MHE | $35 profit, 61ms MPC |
-| **v2** Thermal Model | Temperature state, Arrhenius degradation | +3% degradation at elevated T |
-| **v3** Pack Model | 4-cell pack, active balancing | SOC spread 2.4% -> 0.2% |
-| **v4** Electrical RC | 2RC circuit, NMC OCV, voltage measurement | **47% better SOC estimation** |
-
+| Version | What It Adds | Status |
+|---------|-------------|--------|
+| **v1** Baseline | EMS + MPC + EKF, energy arbitrage + regulation capacity | Frozen |
+| **v2** Thermal Model | Temperature state, Arrhenius degradation coupling | Frozen |
+| **v3** Pack Model | 4-cell pack, active cell balancing | Frozen |
+| **v4** Electrical RC | 2RC equivalent circuit, NMC OCV, voltage measurement | Frozen |
 
 ## Quick Start
 
 ```bash
-uv sync                                    # install dependencies
-uv run python v4_electrical_rc_model/main.py   # run latest version (~5 min)
+uv sync                                       # install dependencies
+uv run python v4_electrical_rc_model/main.py   # run latest version
 ```
 
-Each version is independently runnable. Results (`.npz` + `.png`) go to `results/`.
-
-## Typical Results (24h simulation)
-
-| Metric | Value |
-|--------|-------|
-| Net profit | $35 |
-| SOH degradation | 0.26% |
-| EKF SOC accuracy | 0.12% RMSE |
-| MPC solve time | 222ms avg |
-| Solver failures | 0 / 1,440 |
-| Terminal voltage range | 738 -- 863 V |
+Each version is independently runnable. Results go to `results/`.
 
 ## Technical Stack
 
@@ -72,7 +55,7 @@ CasADi + IPOPT for nonlinear optimization, NumPy for numerics, Matplotlib for vi
 
 | Upcoming | Description |
 |----------|------------|
-| v5 | Regulation activation & MPC necessity |
+| v5 | Regulation activation signals & MPC necessity demonstration |
 | v6 | Unscented Kalman Filter (UKF) |
 | v7 | Online parameter estimation |
 | v8 | Real-time NMPC with ACADOS |

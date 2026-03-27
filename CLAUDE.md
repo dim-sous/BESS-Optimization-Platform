@@ -23,6 +23,7 @@ Each upgrade creates a new versioned folder. Never merge multiple upgrades into 
 A. Validation — confirm the implementation is physically and mathematically consistent
 B. Evaluation — compute and log the standard metrics (see below)
 C. Comparison — generate plots comparing this version to the previous one and to v1
+D. Stress Test - Test the implementation under extreme conditions
 4. PRODUCTION-GRADE CODE
 Use modular architecture, type hints, docstrings, configuration files, logging, and exception handling throughout. Use explicit physical units everywhere. Prefer clarity and maintainability over cleverness.
 5. AVOID OVER-ENGINEERING
