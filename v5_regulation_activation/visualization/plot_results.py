@@ -1,12 +1,14 @@
-"""Ten-panel result visualisation for the v4 electrical RC model.
+"""Fourteen-panel result visualisation for the v5 regulation activation model.
 
-Panel layout (5 rows x 2 columns)
+Panel layout (7 rows x 2 columns)
 ----------------------------------
   [0,0] Pack SOC: true vs EKF vs MHE   |  [0,1] Pack SOH: true vs EKF vs MHE
   [1,0] Individual cell SOCs           |  [1,1] Individual cell temperatures
   [2,0] Terminal voltage + OCV         |  [2,1] RC voltages (V_rc1, V_rc2)
-  [3,0] SOC imbalance + balancing pwr  |  [3,1] Net grid power + price
-  [4,0] Solver timing                  |  [4,1] Cumulative profit breakdown
+  [3,0] Activation signal (v5)         |  [3,1] Regulation delivery (v5)
+  [4,0] SOC imbalance + balancing pwr  |  [4,1] Net grid power + price
+  [5,0] Solver timing                  |  [5,1] Delivery score (v5)
+  [6,0] Revenue breakdown (v5)         |  [6,1] Profit decomposition (v5)
 """
 
 from __future__ import annotations
@@ -49,6 +51,11 @@ def _stepify(
     return t_s, y_s
 
 
+def _downsample(arr: np.ndarray, factor: int) -> np.ndarray:
+    """Downsample by taking every factor-th element."""
+    return arr[::factor]
+
+
 def plot_results(
     sim: dict,
     bp: BatteryParams,
@@ -57,7 +64,7 @@ def plot_results(
     pp: PackParams | None = None,
     save_path: str = "results.png",
 ) -> None:
-    """Generate the ten-panel summary figure."""
+    """Generate the fourteen-panel summary figure."""
     plt.rcParams.update({
         "font.size": _TICK_SIZE,
         "axes.titlesize": _TITLE_SIZE,
@@ -69,17 +76,24 @@ def plot_results(
 
     n_cells = sim.get("n_cells", 1)
     has_cell_data = "cell_socs" in sim and n_cells > 1
+    has_activation = "activation_signal" in sim
+    strategy = sim.get("strategy", "full")
 
-    fig, axes = plt.subplots(5, 2, figsize=(20, 28))
+    fig, axes = plt.subplots(7, 2, figsize=(20, 40))
     suptitle = (
-        f"Hierarchical BESS Control \u2014 v4 Electrical RC Model "
-        f"({n_cells} cells) \u2014 24 h Simulation"
+        f"Hierarchical BESS Control \u2014 v5 Regulation Activation "
+        f"({n_cells} cells, {strategy}) \u2014 "
+        f"{sim['time_sim'][-1]/3600:.0f} h Simulation"
     )
     fig.suptitle(suptitle, fontsize=_SUPTITLE_SIZE, fontweight="bold", y=0.995)
 
     t_sim_h = sim["time_sim"] / 3600.0
     t_mpc_h = sim["time_mpc"] / 3600.0
+    dt_sim_s = float(sim["time_sim"][1] - sim["time_sim"][0]) if len(sim["time_sim"]) > 1 else 4.0
     dt_mpc_s = float(sim["time_mpc"][1] - sim["time_mpc"][0]) if len(sim["time_mpc"]) > 1 else 60.0
+
+    # Downsample factor for dt_sim arrays (4s -> plot every 15th = 60s)
+    ds = max(1, int(dt_mpc_s / dt_sim_s))
 
     # ==================================================================
     #  Panel [0,0] — Pack SOC: true vs EKF vs MHE
@@ -159,18 +173,16 @@ def plot_results(
     ax.grid(True, alpha=0.3)
 
     # ==================================================================
-    #  Panel [2,0] — Terminal Voltage + OCV (v4)
+    #  Panel [2,0] — Terminal Voltage + OCV
     # ==================================================================
     ax = axes[2, 0]
     vterm = sim.get("vterm_true", None)
     if vterm is not None:
         ax.plot(t_sim_h, vterm, color="tab:blue", linewidth=_LW_TRUE,
                 label="V_term (true)")
-        # OCV from SOC
         ocv_vals = ocv_pack_numpy(sim["soc_true"], elp)
         ax.plot(t_sim_h, ocv_vals, color="tab:green", linewidth=1.0,
                 alpha=0.6, linestyle="--", label="OCV(SOC)")
-        # Voltage limits
         ax.axhline(elp.V_min_pack, color="red", linewidth=1.0, linestyle=":",
                    label=f"V_min = {elp.V_min_pack:.0f} V")
         ax.axhline(elp.V_max_pack, color="red", linewidth=1.0, linestyle=":")
@@ -181,7 +193,7 @@ def plot_results(
     ax.grid(True, alpha=0.3)
 
     # ==================================================================
-    #  Panel [2,1] — RC Voltages (v4)
+    #  Panel [2,1] — RC Voltages
     # ==================================================================
     ax = axes[2, 1]
     vrc1 = sim.get("vrc1_true", None)
@@ -200,9 +212,69 @@ def plot_results(
     ax.grid(True, alpha=0.3)
 
     # ==================================================================
-    #  Panel [3,0] — SOC Imbalance + Balancing Power
+    #  Panel [3,0] — Activation Signal (v5)
     # ==================================================================
     ax = axes[3, 0]
+    if has_activation:
+        act = sim["activation_signal"]
+        t_act_h = np.arange(len(act)) * dt_sim_s / 3600.0
+        # Downsample for plotting
+        act_ds = _downsample(act, ds)
+        t_act_ds = _downsample(t_act_h, ds)
+
+        ax.fill_between(t_act_ds, act_ds, 0, where=(act_ds > 0),
+                        color="tab:green", alpha=0.4, label="Up-reg (discharge)")
+        ax.fill_between(t_act_ds, act_ds, 0, where=(act_ds < 0),
+                        color="tab:red", alpha=0.4, label="Down-reg (charge)")
+        ax.plot(t_act_ds, act_ds, color="k", linewidth=0.3, alpha=0.5)
+
+        n_active = np.sum(np.abs(act) > 1e-6)
+        pct_active = n_active / len(act) * 100
+        ax.set_title(f"FCR Activation Signal ({pct_active:.0f}% active)")
+    else:
+        ax.set_title("FCR Activation Signal (N/A)")
+    ax.set_ylabel("Activation [-1, +1]")
+    ax.set_ylim(-1.15, 1.15)
+    ax.axhline(0, color="k", linewidth=0.4, linestyle=":")
+    ax.legend(loc="upper right")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(True, alpha=0.3)
+
+    # ==================================================================
+    #  Panel [3,1] — Regulation Delivery: demanded vs delivered (v5)
+    # ==================================================================
+    ax = axes[3, 1]
+    if has_activation:
+        act = sim["activation_signal"]
+        delivered = sim["power_delivered"]
+        # Reconstruct demanded power (need P_reg_committed from power_applied)
+        P_reg_arr = sim["power_applied"][:, 2]
+        demanded = act * P_reg_arr
+
+        t_reg_h = np.arange(len(act)) * dt_sim_s / 3600.0
+        dem_ds = _downsample(demanded, ds)
+        del_ds = _downsample(delivered, ds)
+        t_ds = _downsample(t_reg_h, ds)
+
+        ax.plot(t_ds, dem_ds, color="tab:blue", linewidth=0.8, alpha=0.6,
+                label="Demanded")
+        ax.plot(t_ds, del_ds, color="tab:orange", linewidth=0.8, alpha=0.8,
+                label="Delivered")
+        ax.axhline(0, color="k", linewidth=0.4, linestyle=":")
+
+        delivery_score = sim.get("delivery_score", 0.0)
+        ax.set_title(f"Regulation Delivery (score: {delivery_score*100:.1f}%)")
+    else:
+        ax.set_title("Regulation Delivery (N/A)")
+    ax.set_ylabel("Power [kW]")
+    ax.legend(loc="upper right")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(True, alpha=0.3)
+
+    # ==================================================================
+    #  Panel [4,0] — SOC Imbalance + Balancing Power
+    # ==================================================================
+    ax = axes[4, 0]
     if has_cell_data:
         soc_imb = sim["soc_imbalance"]
         ax.plot(t_sim_h, soc_imb * 100, color="tab:red", linewidth=_LW_TRUE,
@@ -227,13 +299,15 @@ def plot_results(
     ax.grid(True, alpha=0.3)
 
     # ==================================================================
-    #  Panel [3,1] — Grid Power + Price
+    #  Panel [4,1] — Net Grid Power + Price
     # ==================================================================
-    ax = axes[3, 1]
-    n_mpc = len(sim["power_applied"])
-    t_pow = np.arange(n_mpc) * dt_mpc_s / 3600.0
-    net_grid_power = sim["power_applied"][:, 1] - sim["power_applied"][:, 0]
-    reg_power = sim["power_applied"][:, 2]
+    ax = axes[4, 1]
+    pow_arr = sim.get("power_mpc_base", sim["power_applied"])
+    n_pow = len(pow_arr)
+    pow_dt = dt_mpc_s if "power_mpc_base" in sim else dt_sim_s
+    t_pow = np.arange(n_pow) * pow_dt / 3600.0
+    net_grid_power = pow_arr[:, 1] - pow_arr[:, 0]
+    reg_power = pow_arr[:, 2]
 
     ts, ys = _stepify(t_pow, net_grid_power)
     ax.fill_between(ts, ys, 0, where=(ys >= 0),
@@ -244,11 +318,9 @@ def plot_results(
                     interpolate=True)
     ax.plot(ts, ys, color="k", linewidth=1.0, label="Net grid power")
     ax.step(t_pow, reg_power, where="post",
-            color="tab:orange", linewidth=_LW_MPC, label="P_reg")
-
+            color="tab:orange", linewidth=_LW_MPC, label="P_reg committed")
     ax.axhline(0, color="k", linewidth=0.6, linestyle=":")
     ax.set_ylabel("Power [kW]")
-    ax.set_xlabel("Time [h]")
     ax.legend(loc="upper left", ncol=2)
     ax.set_title("Grid Power Exchange and Regulation Reserve")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
@@ -264,9 +336,9 @@ def plot_results(
         ax2.set_ylabel("Price [$/kWh]", color="tab:purple", alpha=0.6)
 
     # ==================================================================
-    #  Panel [4,0] — Solver Timing
+    #  Panel [5,0] — Solver Timing
     # ==================================================================
-    ax = axes[4, 0]
+    ax = axes[5, 0]
     mpc_times = sim.get("mpc_solve_times", np.array([]))
     est_times = sim.get("est_solve_times", np.array([]))
     if len(mpc_times) > 0:
@@ -291,29 +363,112 @@ def plot_results(
     ax.grid(True, alpha=0.3)
 
     # ==================================================================
-    #  Panel [4,1] — Cumulative profit breakdown
+    #  Panel [5,1] — Delivery Score over time (v5)
     # ==================================================================
-    ax = axes[4, 1]
-    n_prof = len(sim["cumulative_profit"])
+    ax = axes[5, 1]
+    if has_activation:
+        reg_acc = sim["reg_accounting"]  # (N_sim, 4): cap, del, pen, is_ok
+        is_ok = reg_acc[:, 3]
+        act = sim["activation_signal"]
+        active_mask = np.abs(act) > 1e-6
+
+        # Rolling delivery score (window = 15 min = 225 steps at 4s)
+        window = min(225, len(is_ok) // 4)
+        if window > 0:
+            ok_cumsum = np.cumsum(is_ok * active_mask)
+            active_cumsum = np.cumsum(active_mask.astype(float))
+            # Rolling score at each point
+            roll_ok = ok_cumsum[window:] - ok_cumsum[:-window]
+            roll_active = active_cumsum[window:] - active_cumsum[:-window]
+            roll_score = np.where(roll_active > 0, roll_ok / roll_active, 1.0)
+            t_roll = np.arange(len(roll_score)) * dt_sim_s / 3600.0
+
+            ax.plot(t_roll, roll_score * 100, color="tab:blue", linewidth=1.0)
+            ax.axhline(sim.get("delivery_score", 0) * 100, color="tab:red",
+                        linewidth=1.5, linestyle="--",
+                        label=f"Overall: {sim.get('delivery_score', 0)*100:.1f}%")
+            ax.axhline(90, color="tab:green", linewidth=1.0, linestyle=":",
+                        alpha=0.5, label="90% target")
+        ax.set_ylim(-5, 105)
+        ax.set_title(f"Rolling Delivery Score (15-min window)")
+    else:
+        ax.set_title("Delivery Score (N/A)")
+    ax.set_ylabel("Delivery Score [%]")
+    ax.set_xlabel("Time [h]")
+    ax.legend(loc="lower right")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(True, alpha=0.3)
+
+    # ==================================================================
+    #  Panel [6,0] — Cumulative regulation revenue breakdown (v5)
+    # ==================================================================
+    ax = axes[6, 0]
+    if has_activation:
+        reg_acc = sim["reg_accounting"]
+        cap_cum = np.cumsum(reg_acc[:, 0])
+        del_cum = np.cumsum(reg_acc[:, 1])
+        pen_cum = np.cumsum(reg_acc[:, 2])
+        net_cum = cap_cum + del_cum - pen_cum
+
+        t_reg_h = np.arange(len(reg_acc)) * dt_sim_s / 3600.0
+        t_ds = _downsample(t_reg_h, ds)
+
+        ax.plot(t_ds, _downsample(cap_cum, ds), color="tab:blue",
+                linewidth=_LW_EST, label=f"Capacity (${cap_cum[-1]:.2f})")
+        ax.plot(t_ds, _downsample(del_cum, ds), color="tab:green",
+                linewidth=_LW_EST, label=f"Delivery (${del_cum[-1]:.2f})")
+        ax.plot(t_ds, -_downsample(pen_cum, ds), color="tab:red",
+                linewidth=_LW_EST, label=f"Penalty (-${pen_cum[-1]:.2f})")
+        ax.plot(t_ds, _downsample(net_cum, ds), color="k",
+                linewidth=_LW_TRUE, label=f"Net (${net_cum[-1]:.2f})")
+        ax.axhline(0, color="k", linewidth=0.4, linestyle=":")
+    ax.set_ylabel("Cumulative [$]")
+    ax.set_xlabel("Time [h]")
+    ax.legend(loc="upper left")
+    ax.set_title("Regulation Revenue Breakdown")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(True, alpha=0.3)
+
+    # ==================================================================
+    #  Panel [6,1] — Total profit decomposition (v5)
+    # ==================================================================
+    ax = axes[6, 1]
+    energy_profit = sim.get("energy_profit", np.zeros(1))
+    deg_cost = sim.get("deg_cost", np.zeros(1))
+    n_prof = len(energy_profit)
     t_prof = np.arange(n_prof) * dt_mpc_s / 3600.0
 
-    cum_energy = np.cumsum(sim["energy_profit"])
-    cum_reg = np.cumsum(sim["reg_profit"])
-    cum_deg = np.cumsum(sim["deg_cost"])
+    cum_energy = np.cumsum(energy_profit)
+    cum_deg = np.cumsum(deg_cost)
 
     ax.plot(t_prof, cum_energy, color="tab:blue", linewidth=_LW_EST,
-            label="Energy arbitrage")
-    ax.plot(t_prof, cum_reg, color="tab:orange", linewidth=_LW_EST,
-            label="Regulation revenue")
+            label=f"Energy (${cum_energy[-1]:.2f})")
     ax.plot(t_prof, -cum_deg, color="tab:red", linewidth=_LW_EST,
-            label="Degradation cost")
-    ax.plot(t_prof, sim["cumulative_profit"], color="k", linewidth=_LW_TRUE,
-            label=f"Net profit (${sim['total_profit']:.2f})")
+            label=f"Degradation (-${cum_deg[-1]:.2f})")
+
+    if has_activation:
+        reg_acc = sim["reg_accounting"]
+        net_reg_cum = np.cumsum(reg_acc[:, 0] + reg_acc[:, 1] - reg_acc[:, 2])
+        # Resample to MPC resolution for aligned plotting
+        net_reg_at_mpc = _downsample(net_reg_cum, int(dt_mpc_s / dt_sim_s))[:n_prof]
+        if len(net_reg_at_mpc) > 0:
+            t_reg_mpc = np.arange(len(net_reg_at_mpc)) * dt_mpc_s / 3600.0
+            ax.plot(t_reg_mpc, net_reg_at_mpc, color="tab:orange",
+                    linewidth=_LW_EST,
+                    label=f"Reg net (${net_reg_cum[-1]:.2f})")
+            # Total = energy + reg_net - deg
+            total_cum = cum_energy[:len(net_reg_at_mpc)] + net_reg_at_mpc - cum_deg[:len(net_reg_at_mpc)]
+            ax.plot(t_reg_mpc, total_cum, color="k", linewidth=_LW_TRUE,
+                    label=f"Total (${sim['total_profit']:.2f})")
+    else:
+        ax.plot(t_prof, cum_energy - cum_deg, color="k", linewidth=_LW_TRUE,
+                label=f"Total (${sim['total_profit']:.2f})")
+
     ax.axhline(0, color="k", linewidth=0.4, linestyle=":")
     ax.set_ylabel("Cumulative [$]")
     ax.set_xlabel("Time [h]")
     ax.legend(loc="upper left")
-    ax.set_title("Revenue Breakdown")
+    ax.set_title("Total Profit Decomposition")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     ax.grid(True, alpha=0.3)
 

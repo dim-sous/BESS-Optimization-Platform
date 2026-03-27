@@ -5,6 +5,7 @@ Adds lumped-parameter thermal dynamics with Arrhenius degradation coupling.
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import pathlib
@@ -50,6 +51,11 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Orchestrate the hierarchical BESS control simulation with thermal model."""
+    parser = argparse.ArgumentParser(description="v2_thermal_model BESS simulation")
+    parser.add_argument("--mhe", action="store_true", default=False,
+                        help="Enable Moving Horizon Estimator (default: off)")
+    args = parser.parse_args()
+
     # ---- Configuration ----
     bp = BatteryParams()
     tp = TimeParams()
@@ -98,7 +104,7 @@ def main() -> None:
     )
 
     # ---- Multi-rate simulation ----
-    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p, thp)
+    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p, thp, run_mhe=args.mhe)
     results = simulator.run(energy_scen, reg_scen, probs)
 
     # ---- Visualisation ----

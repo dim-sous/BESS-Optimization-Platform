@@ -96,8 +96,9 @@ def plot_results(
             label="True SOC")
     ax.plot(t_mpc_h, sim["soc_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF estimate")
-    ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE estimate")
+    if np.any(sim["soc_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE estimate")
     ax.axhspan(bp.SOC_min, bp.SOC_max, alpha=0.08, color="green",
                label=f"SOC limits [{bp.SOC_min:.0%}\u2013{bp.SOC_max:.0%}]")
     ax.set_ylabel("SOC [-]")
@@ -115,8 +116,9 @@ def plot_results(
             label="True SOH")
     ax.plot(t_mpc_h, sim["soh_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF estimate")
-    ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE estimate")
+    if np.any(sim["soh_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE estimate")
     ax.set_ylabel("SOH [-]")
     ax.legend(loc="lower left")
     ax.set_title("State of Health Estimation")

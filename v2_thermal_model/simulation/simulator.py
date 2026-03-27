@@ -106,19 +106,23 @@ class MultiRateSimulator:
         ekf_p: EKFParams,
         mhe_p: MHEParams,
         thp: ThermalParams,
+        run_mhe: bool = False,
     ) -> None:
         self.bp = bp
         self.tp = tp
         self.ep = ep
         self.mp = mp
         self.thp = thp
+        self.run_mhe = run_mhe
 
         # Sub-components (all receive ThermalParams)
         self.plant = BatteryPlant(bp, tp, thp)
         self.ems = EconomicEMS(bp, tp, ep, thp)
         self.mpc = TrackingMPC(bp, tp, mp, thp)
         self.ekf = ExtendedKalmanFilter(bp, tp, ekf_p, thp)
-        self.mhe = MovingHorizonEstimator(bp, tp, mhe_p, thp)
+        self.mhe: MovingHorizonEstimator | None = None
+        if run_mhe:
+            self.mhe = MovingHorizonEstimator(bp, tp, mhe_p, thp)
 
     # ------------------------------------------------------------------
     #  Main simulation loop
@@ -180,10 +184,11 @@ class MultiRateSimulator:
         soh_ekf[0] = ekf_est[1]
         temp_ekf[0] = ekf_est[2]
 
-        mhe_est = self.mhe.get_estimate()
-        soc_mhe[0] = mhe_est[0]
-        soh_mhe[0] = mhe_est[1]
-        temp_mhe[0] = mhe_est[2]
+        if self.run_mhe:
+            mhe_est = self.mhe.get_estimate()
+            soc_mhe[0] = mhe_est[0]
+            soh_mhe[0] = mhe_est[1]
+            temp_mhe[0] = mhe_est[2]
 
         # Current control command (held between MPC updates)
         u_current = np.zeros(3)
@@ -289,18 +294,21 @@ class MultiRateSimulator:
                 t0_est = time.perf_counter()
                 if sim_step > 0:
                     ekf_est = self.ekf.step(u_current, y_meas)
-                    mhe_est = self.mhe.step(u_current, y_meas)
+                    if self.run_mhe:
+                        mhe_est = self.mhe.step(u_current, y_meas)
                 else:
                     ekf_est = self.ekf.get_estimate()
-                    mhe_est = self.mhe.get_estimate()
+                    if self.run_mhe:
+                        mhe_est = self.mhe.get_estimate()
                 est_solve_times[mpc_idx] = time.perf_counter() - t0_est
 
                 soc_ekf[mpc_idx] = ekf_est[0]
                 soh_ekf[mpc_idx] = ekf_est[1]
                 temp_ekf[mpc_idx] = ekf_est[2]
-                soc_mhe[mpc_idx] = mhe_est[0]
-                soh_mhe[mpc_idx] = mhe_est[1]
-                temp_mhe[mpc_idx] = mhe_est[2]
+                if self.run_mhe:
+                    soc_mhe[mpc_idx] = mhe_est[0]
+                    soh_mhe[mpc_idx] = mhe_est[1]
+                    temp_mhe[mpc_idx] = mhe_est[2]
 
                 # Extract reference windows for MPC
                 off = mpc_ref_base

@@ -7,6 +7,7 @@ per-cell parameter variation and proportional active balancing.
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import pathlib
@@ -53,6 +54,11 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Orchestrate the hierarchical BESS control simulation with pack model."""
+    parser = argparse.ArgumentParser(description=f"Run {VERSION_TAG} simulation")
+    parser.add_argument("--mhe", action="store_true", default=False,
+                        help="Enable MHE estimator (default: OFF)")
+    args = parser.parse_args()
+
     # ---- Configuration ----
     bp = BatteryParams()
     tp = TimeParams()
@@ -111,7 +117,8 @@ def main() -> None:
     )
 
     # ---- Multi-rate simulation ----
-    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p, thp, pp)
+    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p, thp, pp,
+                                    run_mhe=args.mhe)
     results = simulator.run(energy_scen, reg_scen, probs)
 
     # ---- Visualisation ----

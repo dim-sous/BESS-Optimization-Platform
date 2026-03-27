@@ -88,8 +88,9 @@ def plot_results(
             label="True SOC")
     ax.plot(t_mpc_h, sim["soc_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF")
-    ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE")
+    if np.any(sim["soc_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE")
     ax.axhspan(bp.SOC_min, bp.SOC_max, alpha=0.08, color="green",
                label=f"Limits [{bp.SOC_min:.0%}–{bp.SOC_max:.0%}]")
     ax.set_ylabel("SOC [-]")
@@ -107,8 +108,9 @@ def plot_results(
             label="True T")
     ax.plot(t_mpc_h, sim["temp_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF T")
-    ax.plot(t_mpc_h, sim["temp_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE T")
+    if np.any(sim["temp_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["temp_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE T")
     ax.axhline(thp.T_max, color="red", linewidth=1.2, linestyle=":",
                label=f"T_max = {thp.T_max:.0f} °C")
     ax.axhline(thp.T_ambient, color="green", linewidth=1.0, linestyle=":",
@@ -127,8 +129,9 @@ def plot_results(
             label="True SOH")
     ax.plot(t_mpc_h, sim["soh_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF")
-    ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE")
+    if np.any(sim["soh_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE")
     ax.set_ylabel("SOH [-]")
     ax.set_xlabel("Time [h]")
     ax.legend(loc="lower left")

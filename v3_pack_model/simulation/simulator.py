@@ -95,6 +95,7 @@ class MultiRateSimulator:
         mhe_p: MHEParams,
         thp: ThermalParams,
         pp: PackParams | None = None,
+        run_mhe: bool = False,
     ) -> None:
         self.bp = bp
         self.tp = tp
@@ -102,6 +103,7 @@ class MultiRateSimulator:
         self.mp = mp
         self.thp = thp
         self.pp = pp
+        self.run_mhe = run_mhe
 
         # Plant: multi-cell pack or single cell
         if pp is not None:
@@ -115,7 +117,9 @@ class MultiRateSimulator:
         self.ems = EconomicEMS(bp, tp, ep, thp)
         self.mpc = TrackingMPC(bp, tp, mp, thp)
         self.ekf = ExtendedKalmanFilter(bp, tp, ekf_p, thp)
-        self.mhe = MovingHorizonEstimator(bp, tp, mhe_p, thp)
+        self.mhe: MovingHorizonEstimator | None = None
+        if run_mhe:
+            self.mhe = MovingHorizonEstimator(bp, tp, mhe_p, thp)
 
     # ------------------------------------------------------------------
     #  Main simulation loop
@@ -192,10 +196,11 @@ class MultiRateSimulator:
         soh_ekf[0] = ekf_est[1]
         temp_ekf[0] = ekf_est[2]
 
-        mhe_est = self.mhe.get_estimate()
-        soc_mhe[0] = mhe_est[0]
-        soh_mhe[0] = mhe_est[1]
-        temp_mhe[0] = mhe_est[2]
+        if self.run_mhe:
+            mhe_est = self.mhe.get_estimate()
+            soc_mhe[0] = mhe_est[0]
+            soh_mhe[0] = mhe_est[1]
+            temp_mhe[0] = mhe_est[2]
 
         # Current control command
         u_current = np.zeros(3)
@@ -299,18 +304,21 @@ class MultiRateSimulator:
                 t0_est = time.perf_counter()
                 if sim_step > 0:
                     ekf_est = self.ekf.step(u_current, y_meas)
-                    mhe_est = self.mhe.step(u_current, y_meas)
+                    if self.run_mhe:
+                        mhe_est = self.mhe.step(u_current, y_meas)
                 else:
                     ekf_est = self.ekf.get_estimate()
-                    mhe_est = self.mhe.get_estimate()
+                    if self.run_mhe:
+                        mhe_est = self.mhe.get_estimate()
                 est_solve_times[mpc_idx] = time.perf_counter() - t0_est
 
                 soc_ekf[mpc_idx] = ekf_est[0]
                 soh_ekf[mpc_idx] = ekf_est[1]
                 temp_ekf[mpc_idx] = ekf_est[2]
-                soc_mhe[mpc_idx] = mhe_est[0]
-                soh_mhe[mpc_idx] = mhe_est[1]
-                temp_mhe[mpc_idx] = mhe_est[2]
+                if self.run_mhe:
+                    soc_mhe[mpc_idx] = mhe_est[0]
+                    soh_mhe[mpc_idx] = mhe_est[1]
+                    temp_mhe[mpc_idx] = mhe_est[2]
 
                 off = mpc_ref_base
                 N_pred = self.mp.N_mpc

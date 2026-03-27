@@ -1,13 +1,20 @@
-"""Multi-rate simulation coordinator with 2RC electrical model and multi-cell pack.
+"""Multi-rate simulation coordinator with FCR regulation activation.
 
-v4_electrical_rc_model: 5-state dynamics (SOC, SOH, T, V_rc1, V_rc2),
-3-measurement (SOC, T, V_term).
+v5_regulation_activation: 4-rate cascade with PI regulation inner loop.
 
 Time scales
 -----------
-  dt_sim  = 1 s         plant integration  (BatteryPack.step)
+  dt_sim  = 4 s         plant integration  (BatteryPack.step)
+  dt_pi   = 4 s         PI regulation controller  (= dt_sim)
   dt_mpc  = 60 s        MPC solve  +  EKF / MHE update
   dt_ems  = 3 600 s     EMS re-solve
+
+Strategies
+----------
+  FULL:        EMS -> MPC -> PI -> Plant  (complete hierarchy)
+  EMS_PI:      EMS -> PI -> Plant         (no MPC trajectory management)
+  EMS_CLAMPS:  EMS -> Plant               (open-loop with hard SOC clamps)
+  RULE_BASED:  Rule -> Plant              (price-sorted schedule, no optimization)
 """
 
 from __future__ import annotations
@@ -25,14 +32,23 @@ from config.parameters import (
     MHEParams,
     MPCParams,
     PackParams,
+    PIParams,
+    RegulationParams,
+    Strategy,
     ThermalParams,
     TimeParams,
 )
+from data.activation_generator import ActivationSignalGenerator
 from ems.economic_ems import EconomicEMS
 from estimation.ekf import ExtendedKalmanFilter
 from estimation.mhe import MovingHorizonEstimator
 from models.battery_model import BatteryPack, BatteryPlant
 from mpc.tracking_mpc import TrackingMPC
+from pi.regulation_pi import RegulationPI
+from revenue.regulation_revenue import (
+    RegulationAccounting,
+    compute_step_revenue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +93,57 @@ def interpolate_ems_to_mpc(
 
 
 # ---------------------------------------------------------------------------
+#  Rule-based dispatch
+# ---------------------------------------------------------------------------
+
+def rule_based_dispatch(
+    energy_prices: np.ndarray,
+    bp: BatteryParams,
+    n_hours: int,
+) -> dict:
+    """Generate rule-based charge/discharge schedule from price sorting.
+
+    Charges during the cheapest 8 hours, discharges during the most
+    expensive 8 hours.  No regulation commitment.
+    """
+    prices = energy_prices[:n_hours]
+    order = np.argsort(prices)
+
+    p_chg = np.zeros(n_hours)
+    p_dis = np.zeros(n_hours)
+
+    n_charge = min(8, n_hours // 3)
+    n_discharge = min(8, n_hours // 3)
+
+    p_chg[order[:n_charge]] = bp.P_max_kw * 0.8
+    p_dis[order[-n_discharge:]] = bp.P_max_kw * 0.8
+
+    soc_ref = np.full(n_hours + 1, bp.SOC_init)
+    soh_ref = np.full(n_hours + 1, bp.SOH_init)
+    temp_ref = np.full(n_hours + 1, 25.0)
+
+    return {
+        "P_chg_ref": p_chg,
+        "P_dis_ref": p_dis,
+        "P_reg_ref": np.zeros(n_hours),
+        "SOC_ref": soc_ref,
+        "SOH_ref": soh_ref,
+        "TEMP_ref": temp_ref,
+        "VRC1_ref": np.zeros(n_hours + 1),
+        "VRC2_ref": np.zeros(n_hours + 1),
+        "expected_profit": 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
 #  Multi-rate simulator
 # ---------------------------------------------------------------------------
 
 class MultiRateSimulator:
-    """Coordinates plant, EMS, MPC, EKF, and MHE at their respective rates.
+    """Coordinates plant, EMS, MPC, PI, EKF, and MHE at their respective rates.
 
-    v4: accepts ElectricalParams; uses 5-state model with 3 measurements.
+    v5: adds PI inner loop, activation signal, regulation accounting,
+    and strategy-dependent dispatch.
     """
 
     def __init__(
@@ -96,6 +156,9 @@ class MultiRateSimulator:
         mhe_p: MHEParams,
         thp: ThermalParams,
         elp: ElectricalParams,
+        pi_p: PIParams,
+        reg_p: RegulationParams,
+        strategy: Strategy = Strategy.FULL,
         pp: PackParams | None = None,
         run_mhe: bool = False,
     ) -> None:
@@ -105,10 +168,13 @@ class MultiRateSimulator:
         self.mp = mp
         self.thp = thp
         self.elp = elp
+        self.pi_p = pi_p
+        self.reg_p = reg_p
+        self.strategy = strategy
         self.pp = pp
         self.run_mhe = run_mhe
 
-        # Plant: multi-cell pack or single cell
+        # Plant
         if pp is not None:
             self.plant = BatteryPack(bp, tp, thp, elp, pp)
             self.n_cells = pp.n_cells
@@ -116,13 +182,17 @@ class MultiRateSimulator:
             self.plant = BatteryPlant(bp, tp, thp, elp)
             self.n_cells = 1
 
-        # Optimizer-level components (pack-level, 5-state)
+        # Controllers (created even if strategy doesn't use them — lightweight)
         self.ems = EconomicEMS(bp, tp, ep, thp, elp)
         self.mpc = TrackingMPC(bp, tp, mp, thp, elp)
+        self.pi = RegulationPI(bp, pi_p, tp.dt_pi)
         self.ekf = ExtendedKalmanFilter(bp, tp, ekf_p, thp, elp)
         self.mhe: MovingHorizonEstimator | None = None
         if run_mhe:
             self.mhe = MovingHorizonEstimator(bp, tp, mhe_p, thp, elp)
+
+        # Activation signal generator
+        self.activation_gen = ActivationSignalGenerator(reg_p, tp.dt_pi)
 
     # ------------------------------------------------------------------
     #  Main simulation loop
@@ -139,15 +209,22 @@ class MultiRateSimulator:
         tp = self.tp
         ep = self.ep
         thp = self.thp
+        strategy = self.strategy
+        use_ems = strategy != Strategy.RULE_BASED
+        use_mpc = strategy == Strategy.FULL
+        use_pi = strategy in (Strategy.FULL, Strategy.EMS_PI)
 
         # Timing
         total_seconds = int(tp.sim_hours * 3600)
-        steps_per_mpc = int(tp.dt_mpc / tp.dt_sim)
-        steps_per_ems = int(tp.dt_ems / tp.dt_sim)
+        steps_per_mpc = int(tp.dt_mpc / tp.dt_sim)   # 15
+        steps_per_ems = int(tp.dt_ems / tp.dt_sim)    # 900
         N_sim_steps = int(total_seconds / tp.dt_sim)
         N_mpc_steps = int(total_seconds / tp.dt_mpc)
 
-        # Pre-allocate storage (pack-level)
+        # Generate activation signal for entire simulation
+        activation_signal_full = self.activation_gen.generate(N_sim_steps)
+
+        # Pre-allocate storage (pack-level, dt_sim resolution)
         soc_true = np.zeros(N_sim_steps + 1)
         soh_true = np.zeros(N_sim_steps + 1)
         temp_true = np.zeros(N_sim_steps + 1)
@@ -167,7 +244,8 @@ class MultiRateSimulator:
         vrc1_mhe = np.zeros(N_mpc_steps + 1)
         vrc2_mhe = np.zeros(N_mpc_steps + 1)
 
-        power_applied = np.zeros((N_mpc_steps, 3))
+        power_applied = np.zeros((N_sim_steps, 3))  # at dt_sim resolution now
+        power_mpc_base = np.zeros((N_mpc_steps, 3))
 
         # Timing instrumentation
         mpc_solve_times = np.zeros(N_mpc_steps)
@@ -177,11 +255,9 @@ class MultiRateSimulator:
         soc_ref_at_mpc = np.zeros(N_mpc_steps)
         power_ref_at_mpc = np.zeros((N_mpc_steps, 3))
 
-        # EMS-level reference storage
-        ems_p_chg_refs: list[np.ndarray] = []
-        ems_p_dis_refs: list[np.ndarray] = []
-        ems_p_reg_refs: list[np.ndarray] = []
-        ems_soc_refs: list[np.ndarray] = []
+        # Regulation tracking (dt_sim resolution)
+        power_delivered_log = np.zeros(N_sim_steps)
+        activation_log = activation_signal_full.copy()
 
         # Cell-level arrays (only when multi-cell)
         n_cells = self.n_cells
@@ -226,8 +302,10 @@ class MultiRateSimulator:
             vrc1_mhe[0] = mhe_est[3]
             vrc2_mhe[0] = mhe_est[4]
 
-        # Current control command
-        u_current = np.zeros(3)
+        # Current commands
+        u_mpc = np.zeros(3)   # MPC base setpoint
+        u_actual = np.zeros(3)  # actual power to plant (from PI or direct)
+        P_reg_committed = 0.0
 
         # Interpolated MPC-resolution references
         soc_ref_mpc_local = np.full(N_mpc_steps + 1, bp.SOC_init)
@@ -239,11 +317,16 @@ class MultiRateSimulator:
 
         mpc_ref_base = 0
         mpc_idx = 0
-        cum_profit = 0.0
-        cum_profit_arr = np.zeros(N_mpc_steps)
+
+        # Profit tracking
+        cum_energy_profit = 0.0
+        cum_deg_cost = 0.0
         energy_profit_arr = np.zeros(N_mpc_steps)
-        reg_profit_arr = np.zeros(N_mpc_steps)
         deg_cost_arr = np.zeros(N_mpc_steps)
+
+        # Regulation accounting
+        accounting = RegulationAccounting()
+        reg_accounting_arr = np.zeros((N_sim_steps, 4))  # cap, del, pen, score
 
         for sim_step in range(N_sim_steps):
             # ===========================================================
@@ -251,42 +334,51 @@ class MultiRateSimulator:
             # ===========================================================
             if sim_step % steps_per_ems == 0:
                 ems_hour = sim_step // steps_per_ems
-                x_est = self.ekf.get_estimate()
 
-                remaining_hours = min(
-                    ep.N_ems, energy_scenarios.shape[1] - ems_hour
-                )
-                if remaining_hours < 1:
-                    remaining_hours = 1
+                if use_ems:
+                    x_est = self.ekf.get_estimate()
 
-                e_scen = energy_scenarios[:, ems_hour : ems_hour + remaining_hours]
-                r_scen = reg_scenarios[:, ems_hour : ems_hour + remaining_hours]
+                    remaining_hours = min(
+                        ep.N_ems, energy_scenarios.shape[1] - ems_hour
+                    )
+                    if remaining_hours < 1:
+                        remaining_hours = 1
 
-                if e_scen.shape[1] < ep.N_ems:
-                    pad_w = ep.N_ems - e_scen.shape[1]
-                    e_scen = np.pad(e_scen, ((0, 0), (0, pad_w)), mode="edge")
-                    r_scen = np.pad(r_scen, ((0, 0), (0, pad_w)), mode="edge")
+                    e_scen = energy_scenarios[:, ems_hour:ems_hour + remaining_hours]
+                    r_scen = reg_scenarios[:, ems_hour:ems_hour + remaining_hours]
 
-                logger.info(
-                    "EMS solve at t=%d s (hour %d), SOC=%.3f, SOH=%.6f, T=%.1f",
-                    sim_step, ems_hour, x_est[0], x_est[1], x_est[2],
-                )
+                    if e_scen.shape[1] < ep.N_ems:
+                        pad_w = ep.N_ems - e_scen.shape[1]
+                        e_scen = np.pad(e_scen, ((0, 0), (0, pad_w)), mode="edge")
+                        r_scen = np.pad(r_scen, ((0, 0), (0, pad_w)), mode="edge")
 
-                ems_result = self.ems.solve(
-                    soc_init=x_est[0],
-                    soh_init=x_est[1],
-                    t_init=x_est[2],
-                    vrc1_init=x_est[3],
-                    vrc2_init=x_est[4],
-                    energy_scenarios=e_scen,
-                    reg_scenarios=r_scen,
-                    probabilities=probabilities,
-                )
+                    logger.info(
+                        "EMS solve at t=%d s (hour %d), SOC=%.3f, SOH=%.6f, T=%.1f",
+                        sim_step * tp.dt_sim, ems_hour,
+                        x_est[0], x_est[1], x_est[2],
+                    )
 
-                ems_p_chg_refs.append(ems_result["P_chg_ref"].copy())
-                ems_p_dis_refs.append(ems_result["P_dis_ref"].copy())
-                ems_p_reg_refs.append(ems_result["P_reg_ref"].copy())
-                ems_soc_refs.append(ems_result["SOC_ref"].copy())
+                    ems_result = self.ems.solve(
+                        soc_init=x_est[0],
+                        soh_init=x_est[1],
+                        t_init=x_est[2],
+                        vrc1_init=x_est[3],
+                        vrc2_init=x_est[4],
+                        energy_scenarios=e_scen,
+                        reg_scenarios=r_scen,
+                        probabilities=probabilities,
+                    )
+                else:
+                    # Rule-based
+                    n_hours = min(24, energy_scenarios.shape[1] - ems_hour)
+                    if n_hours < 1:
+                        n_hours = 1
+                    ems_result = rule_based_dispatch(
+                        energy_scenarios[0, ems_hour:ems_hour + n_hours],
+                        bp, n_hours,
+                    )
+
+                P_reg_committed = float(ems_result["P_reg_ref"][0])
 
                 # Blending
                 if ems_hour > 0:
@@ -325,101 +417,167 @@ class MultiRateSimulator:
             #  MPC + Estimation update  (every dt_mpc = 60 s)
             # ===========================================================
             if sim_step % steps_per_mpc == 0:
-                y_meas = self.plant.get_measurement()  # shape (3,)
+                y_meas = self.plant.get_measurement()
 
                 t0_est = time.perf_counter()
                 if sim_step > 0:
-                    ekf_est = self.ekf.step(u_current, y_meas)
+                    ekf_est = self.ekf.step(u_actual, y_meas)
                     if self.run_mhe:
-                        mhe_est = self.mhe.step(u_current, y_meas)
+                        mhe_est = self.mhe.step(u_actual, y_meas)
                 else:
                     ekf_est = self.ekf.get_estimate()
                     if self.run_mhe:
                         mhe_est = self.mhe.get_estimate()
-                est_solve_times[mpc_idx] = time.perf_counter() - t0_est
-
-                soc_ekf[mpc_idx] = ekf_est[0]
-                soh_ekf[mpc_idx] = ekf_est[1]
-                temp_ekf[mpc_idx] = ekf_est[2]
-                vrc1_ekf[mpc_idx] = ekf_est[3]
-                vrc2_ekf[mpc_idx] = ekf_est[4]
-                if self.run_mhe:
-                    soc_mhe[mpc_idx] = mhe_est[0]
-                    soh_mhe[mpc_idx] = mhe_est[1]
-                    temp_mhe[mpc_idx] = mhe_est[2]
-                    vrc1_mhe[mpc_idx] = mhe_est[3]
-                    vrc2_mhe[mpc_idx] = mhe_est[4]
-
-                off = mpc_ref_base
-                N_pred = self.mp.N_mpc
-
-                soc_win = self._extract_ref(soc_ref_mpc_local, off, N_pred + 1)
-                soh_win = self._extract_ref(soh_ref_mpc_local, off, N_pred + 1)
-                temp_win = self._extract_ref(temp_ref_mpc_local, off, N_pred + 1)
-                pc_win = self._extract_ref(p_chg_ref_mpc_local, off, N_pred)
-                pd_win = self._extract_ref(p_dis_ref_mpc_local, off, N_pred)
-                pr_win = self._extract_ref(p_reg_ref_mpc_local, off, N_pred)
+                if mpc_idx < N_mpc_steps:
+                    est_solve_times[mpc_idx] = time.perf_counter() - t0_est
 
                 if mpc_idx < N_mpc_steps:
-                    soc_ref_at_mpc[mpc_idx] = soc_win[0]
-                    power_ref_at_mpc[mpc_idx] = [pc_win[0], pd_win[0], pr_win[0]]
+                    soc_ekf[mpc_idx] = ekf_est[0]
+                    soh_ekf[mpc_idx] = ekf_est[1]
+                    temp_ekf[mpc_idx] = ekf_est[2]
+                    vrc1_ekf[mpc_idx] = ekf_est[3]
+                    vrc2_ekf[mpc_idx] = ekf_est[4]
+                    if self.run_mhe:
+                        soc_mhe[mpc_idx] = mhe_est[0]
+                        soh_mhe[mpc_idx] = mhe_est[1]
+                        temp_mhe[mpc_idx] = mhe_est[2]
+                        vrc1_mhe[mpc_idx] = mhe_est[3]
+                        vrc2_mhe[mpc_idx] = mhe_est[4]
 
-                t0_mpc = time.perf_counter()
-                u_current = self.mpc.solve(
-                    x_est=ekf_est,      # shape (5,)
-                    soc_ref=soc_win,
-                    soh_ref=soh_win,
-                    temp_ref=temp_win,
-                    p_chg_ref=pc_win,
-                    p_dis_ref=pd_win,
-                    p_reg_ref=pr_win,
-                    u_prev=u_current,
-                )
-                mpc_solve_times[mpc_idx] = time.perf_counter() - t0_mpc
+                if use_mpc:
+                    off = mpc_ref_base
+                    N_pred = self.mp.N_mpc
+
+                    soc_win = self._extract_ref(soc_ref_mpc_local, off, N_pred + 1)
+                    soh_win = self._extract_ref(soh_ref_mpc_local, off, N_pred + 1)
+                    temp_win = self._extract_ref(temp_ref_mpc_local, off, N_pred + 1)
+                    pc_win = self._extract_ref(p_chg_ref_mpc_local, off, N_pred)
+                    pd_win = self._extract_ref(p_dis_ref_mpc_local, off, N_pred)
+                    pr_win = self._extract_ref(p_reg_ref_mpc_local, off, N_pred)
+
+                    if mpc_idx < N_mpc_steps:
+                        soc_ref_at_mpc[mpc_idx] = soc_win[0]
+                        power_ref_at_mpc[mpc_idx] = [pc_win[0], pd_win[0], pr_win[0]]
+
+                    t0_mpc = time.perf_counter()
+                    u_mpc = self.mpc.solve(
+                        x_est=ekf_est,
+                        soc_ref=soc_win,
+                        soh_ref=soh_win,
+                        temp_ref=temp_win,
+                        p_chg_ref=pc_win,
+                        p_dis_ref=pd_win,
+                        p_reg_ref=pr_win,
+                        u_prev=u_mpc,
+                    )
+                    if mpc_idx < N_mpc_steps:
+                        mpc_solve_times[mpc_idx] = time.perf_counter() - t0_mpc
+                else:
+                    # No MPC: use EMS reference directly
+                    off = min(mpc_ref_base, len(p_chg_ref_mpc_local) - 1)
+                    u_mpc = np.array([
+                        p_chg_ref_mpc_local[off],
+                        p_dis_ref_mpc_local[off],
+                        p_reg_ref_mpc_local[off],
+                    ])
 
                 if mpc_idx < N_mpc_steps:
-                    power_applied[mpc_idx] = u_current
+                    power_mpc_base[mpc_idx] = u_mpc
 
                     # Log balancing power
                     if has_cells:
                         balancing_power_log[:, mpc_idx] = self.plant.get_balancing_power()
 
+                    # Energy profit accounting (at MPC resolution)
                     ems_hour_now = sim_step // steps_per_ems
                     if ems_hour_now < energy_scenarios.shape[1]:
                         price_e = float(energy_scenarios[0, ems_hour_now])
-                        price_r = float(reg_scenarios[0, ems_hour_now])
                     else:
                         price_e = float(energy_scenarios[0, -1])
-                        price_r = float(reg_scenarios[0, -1])
 
                     dt_h = tp.dt_mpc / 3600.0
-                    e_profit = price_e * (u_current[1] - u_current[0]) * dt_h
-                    r_profit = price_r * u_current[2] * dt_h
+                    e_profit = price_e * (u_mpc[1] - u_mpc[0]) * dt_h
                     d_cost = (
                         ep.degradation_cost
                         * bp.alpha_deg
-                        * (u_current[0] + u_current[1] + u_current[2])
+                        * (u_mpc[0] + u_mpc[1] + u_mpc[2])
                         * tp.dt_mpc
                     )
-                    cum_profit += e_profit + r_profit - d_cost
-                    cum_profit_arr[mpc_idx] = cum_profit
+                    cum_energy_profit += e_profit
+                    cum_deg_cost += d_cost
                     energy_profit_arr[mpc_idx] = e_profit
-                    reg_profit_arr[mpc_idx] = r_profit
                     deg_cost_arr[mpc_idx] = d_cost
 
                 mpc_ref_base += 1
                 mpc_idx += 1
 
             # ===========================================================
-            #  Plant step  (every dt_sim = 1 s)
+            #  PI + Plant step  (every dt_sim = dt_pi = 4 s)
             # ===========================================================
-            x_new, _ = self.plant.step(u_current)
+            activation = activation_signal_full[sim_step]
+
+            if use_pi:
+                u_actual, P_delivered = self.pi.compute(
+                    P_chg_base=u_mpc[0],
+                    P_dis_base=u_mpc[1],
+                    P_reg_committed=P_reg_committed,
+                    activation_signal=activation,
+                    soc_current=ekf_est[0],
+                )
+            elif strategy == Strategy.EMS_CLAMPS:
+                # Open-loop with hard SOC clamps
+                P_reg_demand = activation * P_reg_committed
+                P_chg = u_mpc[0]
+                P_dis = u_mpc[1]
+
+                if P_reg_demand > 0:
+                    P_dis += P_reg_demand
+                else:
+                    P_chg += abs(P_reg_demand)
+
+                # Hard SOC clamps
+                soc_now = soc_true[sim_step]
+                if soc_now <= bp.SOC_min + 0.01:
+                    P_dis = 0.0
+                if soc_now >= bp.SOC_max - 0.01:
+                    P_chg = 0.0
+
+                P_chg = np.clip(P_chg, 0.0, bp.P_max_kw)
+                P_dis = np.clip(P_dis, 0.0, bp.P_max_kw)
+
+                P_delivered = (P_dis - u_mpc[1]) - (P_chg - u_mpc[0])
+                u_actual = np.array([P_chg, P_dis, P_reg_committed])
+            else:
+                # Rule-based: no regulation delivery
+                u_actual = np.array([u_mpc[0], u_mpc[1], 0.0])
+                P_delivered = 0.0
+
+            # Regulation revenue accounting (every PI step)
+            ems_hour_now = sim_step // steps_per_ems
+            if ems_hour_now < reg_scenarios.shape[1]:
+                price_r = float(reg_scenarios[0, ems_hour_now])
+            else:
+                price_r = float(reg_scenarios[0, -1])
+
+            cap_rev, del_rev, pen, is_ok = compute_step_revenue(
+                P_reg_committed, activation, P_delivered,
+                price_r, self.reg_p, tp.dt_pi,
+            )
+            is_active = abs(activation) > 1e-6
+            accounting.update(cap_rev, del_rev, pen, is_ok, is_active)
+            reg_accounting_arr[sim_step] = [cap_rev, del_rev, pen, float(is_ok)]
+
+            # Plant step
+            x_new, _ = self.plant.step(u_actual)
             soc_true[sim_step + 1] = x_new[0]
             soh_true[sim_step + 1] = x_new[1]
             temp_true[sim_step + 1] = x_new[2]
             vrc1_true[sim_step + 1] = x_new[3]
             vrc2_true[sim_step + 1] = x_new[4]
             vterm_true[sim_step + 1] = self.plant.get_terminal_voltage()
+
+            power_applied[sim_step] = u_actual
+            power_delivered_log[sim_step] = P_delivered
 
             # Log cell-level states
             if has_cells:
@@ -442,17 +600,29 @@ class MultiRateSimulator:
         vrc1_mhe = vrc1_mhe[:mpc_idx]
         vrc2_mhe = vrc2_mhe[:mpc_idx]
 
+        # Total profit
+        total_profit = (
+            cum_energy_profit
+            + accounting.net_regulation_profit
+            - cum_deg_cost
+        )
+
         logger.info(
-            "Simulation complete: profit=$%.2f, SOH loss=%.4f%%, T_max=%.1f degC, "
-            "V_term range=[%.1f, %.1f] V",
-            cum_profit,
+            "Simulation complete [%s]: profit=$%.2f "
+            "(energy=$%.2f, reg_net=$%.2f, deg=$%.2f), "
+            "delivery_score=%.1f%%, SOH loss=%.4f%%",
+            strategy.value,
+            total_profit,
+            cum_energy_profit,
+            accounting.net_regulation_profit,
+            cum_deg_cost,
+            accounting.delivery_score * 100,
             (soh_true[0] - soh_true[-1]) * 100,
-            np.max(temp_true),
-            np.min(vterm_true[1:]),
-            np.max(vterm_true[1:]),
         )
 
         result = {
+            # Strategy
+            "strategy": strategy.value,
             # Plant (dt_sim resolution)
             "time_sim": np.arange(N_sim_steps + 1) * tp.dt_sim,
             "soc_true": soc_true,
@@ -473,20 +643,26 @@ class MultiRateSimulator:
             "temp_mhe": temp_mhe,
             "vrc1_mhe": vrc1_mhe,
             "vrc2_mhe": vrc2_mhe,
-            # Applied power
-            "power_applied": power_applied[:mpc_idx],
+            # Applied power (dt_sim resolution)
+            "power_applied": power_applied,
+            "power_mpc_base": power_mpc_base[:mpc_idx],
+            # Activation & regulation (dt_sim resolution)
+            "activation_signal": activation_log,
+            "power_delivered": power_delivered_log,
+            "reg_accounting": reg_accounting_arr,
+            # Regulation summary
+            "delivery_score": accounting.delivery_score,
+            "capacity_revenue": accounting.capacity_revenue,
+            "delivery_revenue": accounting.delivery_revenue,
+            "penalty_cost": accounting.penalty_cost,
+            "net_regulation_profit": accounting.net_regulation_profit,
             # Profit
-            "cumulative_profit": cum_profit_arr[:mpc_idx],
+            "energy_profit_total": cum_energy_profit,
             "energy_profit": energy_profit_arr[:mpc_idx],
-            "reg_profit": reg_profit_arr[:mpc_idx],
+            "deg_cost_total": cum_deg_cost,
             "deg_cost": deg_cost_arr[:mpc_idx],
-            "total_profit": cum_profit,
+            "total_profit": total_profit,
             "soh_degradation": soh_true[0] - soh_true[-1],
-            # EMS references
-            "ems_p_chg_refs": ems_p_chg_refs,
-            "ems_p_dis_refs": ems_p_dis_refs,
-            "ems_p_reg_refs": ems_p_reg_refs,
-            "ems_soc_refs": ems_soc_refs,
             # Prices
             "prices_energy": energy_scenarios[0],
             "prices_reg": reg_scenarios[0],
@@ -506,7 +682,9 @@ class MultiRateSimulator:
             result["cell_vrc1s"] = cell_vrc1s
             result["cell_vrc2s"] = cell_vrc2s
             result["balancing_power"] = balancing_power_log[:, :mpc_idx]
-            result["soc_imbalance"] = np.max(cell_socs, axis=0) - np.min(cell_socs, axis=0)
+            result["soc_imbalance"] = (
+                np.max(cell_socs, axis=0) - np.min(cell_socs, axis=0)
+            )
             result["n_cells"] = n_cells
 
         return result

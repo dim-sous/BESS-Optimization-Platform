@@ -1,0 +1,356 @@
+"""Nonlinear tracking MPC with temperature constraints and regulation headroom.
+
+v5_regulation_activation: uses 3-state prediction model (SOC, SOH, T) with
+OCV-based current computation for improved thermal accuracy.  V_rc dynamics
+are omitted from the MPC prediction model because their effect on control
+is negligible (V_rc1_max = I*R1 = 0.375 V at rated current, ~0.05% of pack
+voltage).  The full 2RC model is used in the EKF/MHE estimator, where
+voltage measurements provide SOC observability.
+
+This is standard hierarchical estimation-control separation:
+  - EKF/MHE: 5-state (SOC, SOH, T, V_rc1, V_rc2) — full observability model
+  - MPC:     3-state (SOC, SOH, T)                 — fast, tractable prediction
+  - EMS:     3-state (SOC, SOH, T)                 — coarse hourly planning
+
+Runs every ``dt_mpc`` = 60 s.
+
+States:  x = [SOC, SOH, T]
+Inputs:  u = [P_chg, P_dis, P_reg]   (all >= 0, kW)
+"""
+
+from __future__ import annotations
+
+import logging
+
+import casadi as ca
+import numpy as np
+
+from config.parameters import (
+    BatteryParams,
+    ElectricalParams,
+    MPCParams,
+    ThermalParams,
+    TimeParams,
+)
+from models.battery_model import build_casadi_rk4_integrator_3state
+
+logger = logging.getLogger(__name__)
+
+
+class TrackingMPC:
+    """Nonlinear tracking MPC with temperature constraints and OCV-based thermal.
+
+    Parameters
+    ----------
+    bp  : BatteryParams
+    tp  : TimeParams
+    mp  : MPCParams
+    thp : ThermalParams
+    elp : ElectricalParams
+    """
+
+    def __init__(
+        self,
+        bp: BatteryParams,
+        tp: TimeParams,
+        mp: MPCParams,
+        thp: ThermalParams,
+        elp: ElectricalParams,
+    ) -> None:
+        self.bp = bp
+        self.tp = tp
+        self.mp = mp
+        self.thp = thp
+        self.elp = elp
+
+        # Warm-start caches
+        self._prev_P_chg: np.ndarray | None = None
+        self._prev_P_dis: np.ndarray | None = None
+        self._prev_P_reg: np.ndarray | None = None
+        self._prev_SOC: np.ndarray | None = None
+        self._prev_SOH: np.ndarray | None = None
+        self._prev_TEMP: np.ndarray | None = None
+
+        self._build_problem()
+
+    # ------------------------------------------------------------------
+    #  NLP construction (called once)
+    # ------------------------------------------------------------------
+
+    def _build_problem(self) -> None:
+        N = self.mp.N_mpc      # 60
+        Nc = self.mp.Nc_mpc    # 20
+        bp = self.bp
+        mp = self.mp
+        thp = self.thp
+
+        # 3-state integrator — no sub-stepping needed (all dynamics are slow)
+        F_mpc = build_casadi_rk4_integrator_3state(
+            bp, thp, self.elp, self.tp.dt_mpc,
+        )
+
+        opti = ca.Opti()
+
+        # ---- Decision variables ----
+        P_chg = opti.variable(Nc)          # Free charge power  [kW]
+        P_dis = opti.variable(Nc)          # Free discharge power  [kW]
+        P_reg = opti.variable(Nc)          # Free regulation power  [kW]
+        SOC = opti.variable(N + 1)         # SOC trajectory  [-]
+        SOH = opti.variable(N + 1)         # SOH trajectory  [-]
+        TEMP = opti.variable(N + 1)        # Temperature trajectory  [degC]
+        eps = opti.variable(N + 1)         # Soft-constraint slack (SOC)  [-]
+        eps_temp = opti.variable(N + 1)    # Soft-constraint slack (T)  [degC]
+
+        # ---- Parameters (set each solve) ----
+        soc_0 = opti.parameter()
+        soh_0 = opti.parameter()
+        temp_0 = opti.parameter()
+        soc_ref_p = opti.parameter(N + 1)
+        soh_ref_p = opti.parameter(N + 1)
+        temp_ref_p = opti.parameter(N + 1)
+        p_chg_ref_p = opti.parameter(N)
+        p_dis_ref_p = opti.parameter(N)
+        p_reg_ref_p = opti.parameter(N)
+        u_prev_p = opti.parameter(3)
+
+        # ---- Initial conditions ----
+        opti.subject_to(SOC[0] == soc_0)
+        opti.subject_to(SOH[0] == soh_0)
+        opti.subject_to(TEMP[0] == temp_0)
+
+        # ---- Build cost ----
+        cost = 0.0
+
+        for k in range(N):
+            j = min(k, Nc - 1)   # control horizon blocking
+
+            # Dynamics (3-state)
+            x_k = ca.vertcat(SOC[k], SOH[k], TEMP[k])
+            u_k = ca.vertcat(P_chg[j], P_dis[j], P_reg[j])
+            x_next = F_mpc(x_k, u_k)
+
+            opti.subject_to(SOC[k + 1] == x_next[0])
+            opti.subject_to(SOH[k + 1] == x_next[1])
+            opti.subject_to(TEMP[k + 1] == x_next[2])
+
+            # SOC tracking
+            cost += mp.Q_soc * (SOC[k] - soc_ref_p[k]) ** 2
+            # SOH tracking
+            cost += mp.Q_soh * (SOH[k] - soh_ref_p[k]) ** 2
+            # Temperature tracking
+            cost += mp.Q_temp * (TEMP[k] - temp_ref_p[k]) ** 2
+            # Power tracking (all three inputs)
+            cost += mp.R_power * (
+                (P_chg[j] - p_chg_ref_p[k]) ** 2
+                + (P_dis[j] - p_dis_ref_p[k]) ** 2
+                + (P_reg[j] - p_reg_ref_p[k]) ** 2
+            )
+
+            # v5: regulation headroom cost — penalise P_reg when SOC is
+            # close to limits, because the PI loop needs room to deliver
+            soc_low_margin = SOC[k] - bp.SOC_min
+            soc_high_margin = bp.SOC_max - SOC[k]
+            soc_headroom = ca.fmin(soc_low_margin, soc_high_margin)
+            headroom_deficit = ca.fmax(0, mp.headroom_band - soc_headroom)
+            cost += mp.Q_headroom * P_reg[j] * headroom_deficit ** 2
+
+            # Rate-of-change penalty
+            if k == 0:
+                cost += mp.R_delta * (
+                    (P_chg[0] - u_prev_p[0]) ** 2
+                    + (P_dis[0] - u_prev_p[1]) ** 2
+                    + (P_reg[0] - u_prev_p[2]) ** 2
+                )
+            elif k < Nc:
+                cost += mp.R_delta * (
+                    (P_chg[k] - P_chg[k - 1]) ** 2
+                    + (P_dis[k] - P_dis[k - 1]) ** 2
+                    + (P_reg[k] - P_reg[k - 1]) ** 2
+                )
+
+        # Terminal cost
+        cost += mp.Q_terminal * (SOC[N] - soc_ref_p[N]) ** 2
+
+        # Soft-constraint penalties
+        for k in range(N + 1):
+            cost += mp.slack_penalty * eps[k] ** 2
+            cost += mp.slack_penalty_temp * eps_temp[k] ** 2
+
+        opti.minimize(cost)
+
+        # ---- Constraints ----
+        opti.subject_to(opti.bounded(0.0, P_chg, bp.P_max_kw))
+        opti.subject_to(opti.bounded(0.0, P_dis, bp.P_max_kw))
+        opti.subject_to(opti.bounded(0.0, P_reg, bp.P_max_kw * 0.3))
+        opti.subject_to(eps >= 0)
+        opti.subject_to(eps_temp >= 0)
+
+        for k in range(N + 1):
+            opti.subject_to(SOC[k] >= bp.SOC_min - eps[k])
+            opti.subject_to(SOC[k] <= bp.SOC_max + eps[k])
+            opti.subject_to(TEMP[k] <= thp.T_max + eps_temp[k])
+            opti.subject_to(TEMP[k] >= thp.T_min - eps_temp[k])
+        opti.subject_to(opti.bounded(0.5, SOH, 1.001))
+
+        # Power budget
+        for j in range(Nc):
+            opti.subject_to(P_chg[j] + P_reg[j] <= bp.P_max_kw)
+            opti.subject_to(P_dis[j] + P_reg[j] <= bp.P_max_kw)
+
+        # ---- Solver options ----
+        opts = {
+            "ipopt.print_level": 0,
+            "ipopt.sb": "yes",
+            "print_time": 0,
+            "ipopt.max_iter": 500,
+            "ipopt.tol": 1e-6,
+            "ipopt.acceptable_tol": 1e-4,
+            "ipopt.warm_start_init_point": "yes",
+            "ipopt.mu_init": 1e-3,
+        }
+        opti.solver("ipopt", opts)
+
+        # ---- Store handles ----
+        self._opti = opti
+        self._P_chg = P_chg
+        self._P_dis = P_dis
+        self._P_reg = P_reg
+        self._SOC = SOC
+        self._SOH = SOH
+        self._TEMP = TEMP
+        self._eps = eps
+        self._eps_temp = eps_temp
+        self._soc_0 = soc_0
+        self._soh_0 = soh_0
+        self._temp_0 = temp_0
+        self._soc_ref_p = soc_ref_p
+        self._soh_ref_p = soh_ref_p
+        self._temp_ref_p = temp_ref_p
+        self._p_chg_ref_p = p_chg_ref_p
+        self._p_dis_ref_p = p_dis_ref_p
+        self._p_reg_ref_p = p_reg_ref_p
+        self._u_prev_p = u_prev_p
+
+    # ------------------------------------------------------------------
+    #  Solve
+    # ------------------------------------------------------------------
+
+    def solve(
+        self,
+        x_est: np.ndarray,
+        soc_ref: np.ndarray,
+        soh_ref: np.ndarray,
+        temp_ref: np.ndarray,
+        p_chg_ref: np.ndarray,
+        p_dis_ref: np.ndarray,
+        p_reg_ref: np.ndarray,
+        u_prev: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Compute the MPC control action.
+
+        Parameters
+        ----------
+        x_est     : ndarray (5,)   [SOC_est, SOH_est, T_est, V_rc1_est, V_rc2_est]
+                    Only the first 3 elements are used for the MPC prediction.
+                    V_rc estimates are produced by the EKF but ignored here.
+        soc_ref   : ndarray (N+1,)
+        soh_ref   : ndarray (N+1,)
+        temp_ref  : ndarray (N+1,)
+        p_chg_ref : ndarray (N,)
+        p_dis_ref : ndarray (N,)
+        p_reg_ref : ndarray (N,)
+        u_prev    : ndarray (3,) or None
+
+        Returns
+        -------
+        u_cmd : ndarray (3,)   [P_chg, P_dis, P_reg]
+        """
+        N = self.mp.N_mpc
+        Nc = self.mp.Nc_mpc
+        opti = self._opti
+        thp = self.thp
+
+        # Pad references if shorter than required
+        soc_ref = self._pad(soc_ref, N + 1)
+        soh_ref = self._pad(soh_ref, N + 1)
+        temp_ref = self._pad(temp_ref, N + 1)
+        p_chg_ref = self._pad(p_chg_ref, N)
+        p_dis_ref = self._pad(p_dis_ref, N)
+        p_reg_ref = self._pad(p_reg_ref, N)
+
+        # Use only SOC, SOH, T from the 5-state estimate
+        soc_0_val = float(np.clip(x_est[0], self.bp.SOC_min, self.bp.SOC_max))
+        soh_0_val = float(np.clip(x_est[1], 0.5, 1.0))
+        temp_0_val = float(np.clip(x_est[2], thp.T_min, thp.T_max))
+
+        if u_prev is None:
+            u_prev = np.array([p_chg_ref[0], p_dis_ref[0], p_reg_ref[0]])
+
+        # Set parameters
+        opti.set_value(self._soc_0, soc_0_val)
+        opti.set_value(self._soh_0, soh_0_val)
+        opti.set_value(self._temp_0, temp_0_val)
+        opti.set_value(self._soc_ref_p, soc_ref)
+        opti.set_value(self._soh_ref_p, soh_ref)
+        opti.set_value(self._temp_ref_p, temp_ref)
+        opti.set_value(self._p_chg_ref_p, p_chg_ref)
+        opti.set_value(self._p_dis_ref_p, p_dis_ref)
+        opti.set_value(self._p_reg_ref_p, p_reg_ref)
+        opti.set_value(self._u_prev_p, u_prev)
+
+        # Warm-start from previous solution
+        if self._prev_P_chg is not None:
+            opti.set_initial(self._P_chg, self._prev_P_chg)
+            opti.set_initial(self._P_dis, self._prev_P_dis)
+            opti.set_initial(self._P_reg, self._prev_P_reg)
+            opti.set_initial(self._SOC, self._prev_SOC)
+            opti.set_initial(self._SOH, self._prev_SOH)
+            opti.set_initial(self._TEMP, self._prev_TEMP)
+        else:
+            opti.set_initial(self._P_chg, p_chg_ref[:Nc])
+            opti.set_initial(self._P_dis, p_dis_ref[:Nc])
+            opti.set_initial(self._P_reg, p_reg_ref[:Nc])
+            opti.set_initial(self._SOC, soc_ref)
+            opti.set_initial(self._SOH, soh_ref)
+            opti.set_initial(self._TEMP, temp_ref)
+        opti.set_initial(self._eps, 0.0)
+        opti.set_initial(self._eps_temp, 0.0)
+
+        # Solve
+        try:
+            sol = opti.solve()
+
+            pc = np.array(sol.value(self._P_chg)).flatten()
+            pd = np.array(sol.value(self._P_dis)).flatten()
+            pr = np.array(sol.value(self._P_reg)).flatten()
+            soc_opt = np.array(sol.value(self._SOC)).flatten()
+            soh_opt = np.array(sol.value(self._SOH)).flatten()
+            temp_opt = np.array(sol.value(self._TEMP)).flatten()
+
+            u_cmd = np.array([pc[0], pd[0], pr[0]])
+
+            # Cache shifted solution for warm-start
+            self._prev_P_chg = np.append(pc[1:], pc[-1])
+            self._prev_P_dis = np.append(pd[1:], pd[-1])
+            self._prev_P_reg = np.append(pr[1:], pr[-1])
+            self._prev_SOC = np.append(soc_opt[1:], soc_opt[-1])
+            self._prev_SOH = np.append(soh_opt[1:], soh_opt[-1])
+            self._prev_TEMP = np.append(temp_opt[1:], temp_opt[-1])
+
+        except RuntimeError as exc:
+            logger.warning("MPC solver failed: %s", str(exc)[:200])
+            u_cmd = np.zeros(3)
+
+        return u_cmd
+
+    # ------------------------------------------------------------------
+    #  Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pad(arr: np.ndarray, target_len: int) -> np.ndarray:
+        """Pad (or truncate) an array to *target_len* by repeating the last value."""
+        if len(arr) >= target_len:
+            return arr[:target_len]
+        pad_val = arr[-1] if len(arr) > 0 else 0.0
+        return np.concatenate([arr, np.full(target_len - len(arr), pad_val)])

@@ -84,8 +84,9 @@ def plot_results(
             label="Pack SOC (true)")
     ax.plot(t_mpc_h, sim["soc_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF")
-    ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE")
+    if np.any(sim["soc_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE")
     if has_cell_data:
         cell_colors = plt.cm.Set2(np.linspace(0, 1, n_cells))
         for i in range(n_cells):
@@ -140,8 +141,9 @@ def plot_results(
             label="Pack SOH (true)")
     ax.plot(t_mpc_h, sim["soh_ekf"], color="tab:blue", linewidth=_LW_EST,
             label="EKF")
-    ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
-            linestyle="--", label="MHE")
+    if np.any(sim["soh_mhe"] != 0):
+        ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
+                linestyle="--", label="MHE")
     if has_cell_data and "cell_sohs" in sim:
         for i in range(n_cells):
             ax.plot(t_sim_h, sim["cell_sohs"][i], color=cell_colors[i],

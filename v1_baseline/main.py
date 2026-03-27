@@ -5,6 +5,7 @@ Baseline version with timing instrumentation.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import pathlib
 import sys
@@ -46,6 +47,11 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Orchestrate the hierarchical BESS control simulation."""
+    parser = argparse.ArgumentParser(description="v1_baseline BESS simulation")
+    parser.add_argument("--mhe", action="store_true", default=False,
+                        help="Enable Moving Horizon Estimator (default: off)")
+    args = parser.parse_args()
+
     # ---- Configuration ----
     bp = BatteryParams()
     tp = TimeParams()
@@ -84,7 +90,7 @@ def main() -> None:
     )
 
     # ---- Multi-rate simulation ----
-    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p)
+    simulator = MultiRateSimulator(bp, tp, ep, mp, ekf_p, mhe_p, run_mhe=args.mhe)
     results = simulator.run(energy_scen, reg_scen, probs)
 
     # ---- Visualisation ----
