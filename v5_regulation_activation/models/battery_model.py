@@ -224,7 +224,7 @@ def build_casadi_dynamics(
 
 def build_casadi_dynamics_3state(
     bp: BatteryParams, thp: ThermalParams, elp: ElectricalParams,
-    n_modules: int = 4,
+    n_modules: int = 4, expected_activation_frac: float = 0.0,
 ) -> ca.Function:
     """Return a 3-state CasADi ODE  f(x, u) -> x_dot  for the EMS layer.
 
@@ -232,12 +232,21 @@ def build_casadi_dynamics_3state(
     while still using the OCV polynomial for improved thermal accuracy
     over v3's constant-voltage model.
 
+    When expected_activation_frac > 0, the SOC dynamics include the expected
+    energy drain from regulation delivery.  Symmetric activation (equal UP/DOWN)
+    causes a net SOC loss of (eta_c - 1/eta_d) * E[|a|] * P_reg / E_eff per
+    second, reflecting round-trip efficiency losses during delivery.
+
     Parameters
     ----------
     bp  : BatteryParams
     thp : ThermalParams
     elp : ElectricalParams
     n_modules : int
+    expected_activation_frac : float
+        Expected absolute activation signal E[|a|] from the Markov chain
+        stationary distribution.  0.0 disables the regulation throughput
+        cost (backward-compatible with v4).
 
     Returns
     -------
@@ -252,6 +261,14 @@ def build_casadi_dynamics_3state(
     # ---- SOC dynamics ----
     E_eff_kws = SOH * bp.E_nom_kwh * 3600.0
     dSOC_dt = (bp.eta_charge * P_chg - P_dis / bp.eta_discharge) / E_eff_kws
+
+    # Expected SOC drain from regulation delivery efficiency losses.
+    # Symmetric activation: half charge (stores eta_c * P), half discharge
+    # (uses P / eta_d).  Net per unit delivered:
+    #   eta_c - 1/eta_d  ≈  0.95 - 1.053  =  -0.103  (always negative)
+    if expected_activation_frac > 0.0:
+        eta_loss = bp.eta_charge - 1.0 / bp.eta_discharge   # < 0
+        dSOC_dt += eta_loss * expected_activation_frac * P_reg / E_eff_kws
 
     # ---- Thermally-coupled degradation ----
     T_ref_K = thp.T_ref + 273.15
@@ -275,7 +292,7 @@ def build_casadi_dynamics_3state(
 
 def build_casadi_rk4_integrator_3state(
     bp: BatteryParams, thp: ThermalParams, elp: ElectricalParams,
-    dt: float, n_modules: int = 4,
+    dt: float, n_modules: int = 4, expected_activation_frac: float = 0.0,
 ) -> ca.Function:
     """Return a single-step RK4 integrator for the 3-state EMS model.
 
@@ -285,7 +302,7 @@ def build_casadi_rk4_integrator_3state(
     -------
     ca.Function  with signature  (x[3], u[3]) -> x_next[3]
     """
-    f = build_casadi_dynamics_3state(bp, thp, elp, n_modules)
+    f = build_casadi_dynamics_3state(bp, thp, elp, n_modules, expected_activation_frac)
 
     x = ca.MX.sym("x", 3)
     u = ca.MX.sym("u", 3)

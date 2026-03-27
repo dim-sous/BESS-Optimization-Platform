@@ -75,6 +75,7 @@ class EconomicEMS:
         # No sub-stepping needed — all dynamics are slow at this timescale
         self._F_ems = build_casadi_rk4_integrator_3state(
             bp, thp, elp, tp.dt_ems,
+            expected_activation_frac=ep.expected_activation_frac,
         )
 
     # ------------------------------------------------------------------
