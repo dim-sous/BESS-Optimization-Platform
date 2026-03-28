@@ -317,9 +317,11 @@ def test_mpc_temperature_constraint() -> bool:
     N = mp.N_mpc
     x_est = np.array([0.50, 1.0, 43.0, 0.0, 0.0])
     u_cmd = mpc.solve(
-        x_est,
-        np.full(N + 1, 0.50), np.full(N + 1, 1.0), np.full(N + 1, 25.0),
-        np.full(N, 80.0), np.zeros(N), np.full(N, 20.0),
+        x_est=x_est,
+        soc_ref=np.full(N + 1, 0.50),
+        p_chg_ref=np.full(N, 80.0),
+        p_dis_ref=np.zeros(N),
+        p_reg_ref=np.full(N, 20.0),
     )
 
     total_power = u_cmd.sum()

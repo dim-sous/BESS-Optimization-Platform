@@ -1,20 +1,22 @@
 """Nonlinear tracking MPC with temperature constraints and regulation headroom.
 
-v5_regulation_activation: uses 3-state prediction model (SOC, SOH, T) with
-OCV-based current computation for improved thermal accuracy.  V_rc dynamics
-are omitted from the MPC prediction model because their effect on control
-is negligible (V_rc1_max = I*R1 = 0.375 V at rated current, ~0.05% of pack
-voltage).  The full 2RC model is used in the EKF/MHE estimator, where
-voltage measurements provide SOC observability.
+v5_regulation_activation: uses 2-state prediction model (SOC, T) with SOH
+frozen as a parameter.  SOH changes ~0.001 over the 1-hour MPC horizon —
+negligible for control.  The EMS handles SOH economics at the hourly level.
 
-This is standard hierarchical estimation-control separation:
+Hierarchical estimation-control separation:
   - EKF/MHE: 5-state (SOC, SOH, T, V_rc1, V_rc2) — full observability model
-  - MPC:     3-state (SOC, SOH, T)                 — fast, tractable prediction
-  - EMS:     3-state (SOC, SOH, T)                 — coarse hourly planning
+  - MPC:     2-state (SOC, T) + SOH parameter      — fast, tractable prediction
+  - EMS:     3-state (SOC, SOH, T)                  — coarse hourly planning
+
+The MPC objective combines SOC tracking (closed-loop state feedback) with
+power reference tracking (economic timing from EMS) and rate-of-change
+smoothness.  Temperature is predicted for constraint enforcement only
+(no tracking term — the soft constraint handles thermal safety).
 
 Runs every ``dt_mpc`` = 60 s.
 
-States:  x = [SOC, SOH, T]
+States:  x = [SOC, T]  (SOH frozen as parameter)
 Inputs:  u = [P_chg, P_dis, P_reg]   (all >= 0, kW)
 """
 
@@ -32,13 +34,53 @@ from config.parameters import (
     ThermalParams,
     TimeParams,
 )
-from models.battery_model import build_casadi_rk4_integrator_3state
+from models.battery_model import build_casadi_dynamics_3state
 
 logger = logging.getLogger(__name__)
 
 
+def _build_2state_integrator(
+    bp: BatteryParams,
+    thp: ThermalParams,
+    elp: ElectricalParams,
+    dt: float,
+    soh_param: ca.MX,
+) -> ca.Function:
+    """Build a 2-state (SOC, T) RK4 integrator with SOH as an external parameter.
+
+    Internally uses the 3-state ODE but fixes SOH to *soh_param* and
+    discards the dSOH output.
+
+    Returns
+    -------
+    ca.Function  (x2[2], u[3], soh[1]) -> x2_next[2]
+    """
+    f3 = build_casadi_dynamics_3state(bp, thp, elp)
+
+    x2 = ca.MX.sym("x2", 2)   # [SOC, T]
+    u = ca.MX.sym("u", 3)
+    soh = ca.MX.sym("soh", 1)
+
+    # Reconstruct 3-state vector with frozen SOH
+    x3 = ca.vertcat(x2[0], soh, x2[1])  # [SOC, SOH, T]
+
+    def rk4_f(x2_in: ca.MX) -> ca.MX:
+        x3_in = ca.vertcat(x2_in[0], soh, x2_in[1])
+        xdot3 = f3(x3_in, u)
+        return ca.vertcat(xdot3[0], xdot3[2])  # [dSOC, dT], skip dSOH
+
+    k1 = rk4_f(x2)
+    k2 = rk4_f(x2 + dt / 2.0 * k1)
+    k3 = rk4_f(x2 + dt / 2.0 * k2)
+    k4 = rk4_f(x2 + dt * k3)
+    x2_next = x2 + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+    return ca.Function("rk4_2s", [x2, u, soh], [x2_next],
+                        ["x2", "u", "soh"], ["x2_next"])
+
+
 class TrackingMPC:
-    """Nonlinear tracking MPC with temperature constraints and OCV-based thermal.
+    """Nonlinear tracking MPC with simplified 2-state prediction model.
 
     Parameters
     ----------
@@ -68,7 +110,6 @@ class TrackingMPC:
         self._prev_P_dis: np.ndarray | None = None
         self._prev_P_reg: np.ndarray | None = None
         self._prev_SOC: np.ndarray | None = None
-        self._prev_SOH: np.ndarray | None = None
         self._prev_TEMP: np.ndarray | None = None
 
         self._build_problem()
@@ -84,38 +125,34 @@ class TrackingMPC:
         mp = self.mp
         thp = self.thp
 
-        # 3-state integrator — no sub-stepping needed (all dynamics are slow)
-        F_mpc = build_casadi_rk4_integrator_3state(
-            bp, thp, self.elp, self.tp.dt_mpc,
-        )
-
         opti = ca.Opti()
 
         # ---- Decision variables ----
-        P_chg = opti.variable(Nc)          # Free charge power  [kW]
-        P_dis = opti.variable(Nc)          # Free discharge power  [kW]
-        P_reg = opti.variable(Nc)          # Free regulation power  [kW]
-        SOC = opti.variable(N + 1)         # SOC trajectory  [-]
-        SOH = opti.variable(N + 1)         # SOH trajectory  [-]
-        TEMP = opti.variable(N + 1)        # Temperature trajectory  [degC]
-        eps = opti.variable(N + 1)         # Soft-constraint slack (SOC)  [-]
-        eps_temp = opti.variable(N + 1)    # Soft-constraint slack (T)  [degC]
+        P_chg = opti.variable(Nc)
+        P_dis = opti.variable(Nc)
+        P_reg = opti.variable(Nc)
+        SOC = opti.variable(N + 1)
+        TEMP = opti.variable(N + 1)
+        eps = opti.variable(N + 1)         # Soft SOC slack
+        eps_temp = opti.variable(N + 1)    # Soft temperature slack
 
         # ---- Parameters (set each solve) ----
         soc_0 = opti.parameter()
-        soh_0 = opti.parameter()
+        soh_p = opti.parameter()           # SOH frozen as parameter
         temp_0 = opti.parameter()
         soc_ref_p = opti.parameter(N + 1)
-        soh_ref_p = opti.parameter(N + 1)
-        temp_ref_p = opti.parameter(N + 1)
         p_chg_ref_p = opti.parameter(N)
         p_dis_ref_p = opti.parameter(N)
         p_reg_ref_p = opti.parameter(N)
         u_prev_p = opti.parameter(3)
 
+        # ---- 2-state integrator with SOH parameter ----
+        F_mpc = _build_2state_integrator(
+            bp, thp, self.elp, self.tp.dt_mpc, soh_p,
+        )
+
         # ---- Initial conditions ----
         opti.subject_to(SOC[0] == soc_0)
-        opti.subject_to(SOH[0] == soh_0)
         opti.subject_to(TEMP[0] == temp_0)
 
         # ---- Build cost ----
@@ -124,35 +161,23 @@ class TrackingMPC:
         for k in range(N):
             j = min(k, Nc - 1)   # control horizon blocking
 
-            # Dynamics (3-state)
-            x_k = ca.vertcat(SOC[k], SOH[k], TEMP[k])
+            # Dynamics (2-state)
+            x2_k = ca.vertcat(SOC[k], TEMP[k])
             u_k = ca.vertcat(P_chg[j], P_dis[j], P_reg[j])
-            x_next = F_mpc(x_k, u_k)
+            x2_next = F_mpc(x2_k, u_k, soh_p)
 
-            opti.subject_to(SOC[k + 1] == x_next[0])
-            opti.subject_to(SOH[k + 1] == x_next[1])
-            opti.subject_to(TEMP[k + 1] == x_next[2])
+            opti.subject_to(SOC[k + 1] == x2_next[0])
+            opti.subject_to(TEMP[k + 1] == x2_next[1])
 
-            # SOC tracking
+            # SOC tracking — closed-loop state feedback
             cost += mp.Q_soc * (SOC[k] - soc_ref_p[k]) ** 2
-            # SOH tracking
-            cost += mp.Q_soh * (SOH[k] - soh_ref_p[k]) ** 2
-            # Temperature tracking
-            cost += mp.Q_temp * (TEMP[k] - temp_ref_p[k]) ** 2
-            # Power tracking (all three inputs)
+
+            # Power tracking — economic timing signal from EMS
             cost += mp.R_power * (
                 (P_chg[j] - p_chg_ref_p[k]) ** 2
                 + (P_dis[j] - p_dis_ref_p[k]) ** 2
                 + (P_reg[j] - p_reg_ref_p[k]) ** 2
             )
-
-            # v5: regulation headroom cost — penalise P_reg when SOC is
-            # close to limits, because the PI loop needs room to deliver
-            soc_low_margin = SOC[k] - bp.SOC_min
-            soc_high_margin = bp.SOC_max - SOC[k]
-            soc_headroom = ca.fmin(soc_low_margin, soc_high_margin)
-            headroom_deficit = ca.fmax(0, mp.headroom_band - soc_headroom)
-            cost += mp.Q_headroom * P_reg[j] * headroom_deficit ** 2
 
             # Rate-of-change penalty
             if k == 0:
@@ -190,7 +215,6 @@ class TrackingMPC:
             opti.subject_to(SOC[k] <= bp.SOC_max + eps[k])
             opti.subject_to(TEMP[k] <= thp.T_max + eps_temp[k])
             opti.subject_to(TEMP[k] >= thp.T_min - eps_temp[k])
-        opti.subject_to(opti.bounded(0.5, SOH, 1.001))
 
         # Power budget
         for j in range(Nc):
@@ -216,16 +240,13 @@ class TrackingMPC:
         self._P_dis = P_dis
         self._P_reg = P_reg
         self._SOC = SOC
-        self._SOH = SOH
         self._TEMP = TEMP
         self._eps = eps
         self._eps_temp = eps_temp
         self._soc_0 = soc_0
-        self._soh_0 = soh_0
+        self._soh_p = soh_p
         self._temp_0 = temp_0
         self._soc_ref_p = soc_ref_p
-        self._soh_ref_p = soh_ref_p
-        self._temp_ref_p = temp_ref_p
         self._p_chg_ref_p = p_chg_ref_p
         self._p_dis_ref_p = p_dis_ref_p
         self._p_reg_ref_p = p_reg_ref_p
@@ -239,8 +260,6 @@ class TrackingMPC:
         self,
         x_est: np.ndarray,
         soc_ref: np.ndarray,
-        soh_ref: np.ndarray,
-        temp_ref: np.ndarray,
         p_chg_ref: np.ndarray,
         p_dis_ref: np.ndarray,
         p_reg_ref: np.ndarray,
@@ -251,11 +270,8 @@ class TrackingMPC:
         Parameters
         ----------
         x_est     : ndarray (5,)   [SOC_est, SOH_est, T_est, V_rc1_est, V_rc2_est]
-                    Only the first 3 elements are used for the MPC prediction.
-                    V_rc estimates are produced by the EKF but ignored here.
+                    SOH is used as a frozen parameter. V_rc estimates are ignored.
         soc_ref   : ndarray (N+1,)
-        soh_ref   : ndarray (N+1,)
-        temp_ref  : ndarray (N+1,)
         p_chg_ref : ndarray (N,)
         p_dis_ref : ndarray (N,)
         p_reg_ref : ndarray (N,)
@@ -270,17 +286,13 @@ class TrackingMPC:
         opti = self._opti
         thp = self.thp
 
-        # Pad references if shorter than required
         soc_ref = self._pad(soc_ref, N + 1)
-        soh_ref = self._pad(soh_ref, N + 1)
-        temp_ref = self._pad(temp_ref, N + 1)
         p_chg_ref = self._pad(p_chg_ref, N)
         p_dis_ref = self._pad(p_dis_ref, N)
         p_reg_ref = self._pad(p_reg_ref, N)
 
-        # Use only SOC, SOH, T from the 5-state estimate
         soc_0_val = float(np.clip(x_est[0], self.bp.SOC_min, self.bp.SOC_max))
-        soh_0_val = float(np.clip(x_est[1], 0.5, 1.0))
+        soh_val = float(np.clip(x_est[1], 0.5, 1.0))
         temp_0_val = float(np.clip(x_est[2], thp.T_min, thp.T_max))
 
         if u_prev is None:
@@ -288,31 +300,27 @@ class TrackingMPC:
 
         # Set parameters
         opti.set_value(self._soc_0, soc_0_val)
-        opti.set_value(self._soh_0, soh_0_val)
+        opti.set_value(self._soh_p, soh_val)
         opti.set_value(self._temp_0, temp_0_val)
         opti.set_value(self._soc_ref_p, soc_ref)
-        opti.set_value(self._soh_ref_p, soh_ref)
-        opti.set_value(self._temp_ref_p, temp_ref)
         opti.set_value(self._p_chg_ref_p, p_chg_ref)
         opti.set_value(self._p_dis_ref_p, p_dis_ref)
         opti.set_value(self._p_reg_ref_p, p_reg_ref)
         opti.set_value(self._u_prev_p, u_prev)
 
-        # Warm-start from previous solution
+        # Warm-start
         if self._prev_P_chg is not None:
             opti.set_initial(self._P_chg, self._prev_P_chg)
             opti.set_initial(self._P_dis, self._prev_P_dis)
             opti.set_initial(self._P_reg, self._prev_P_reg)
             opti.set_initial(self._SOC, self._prev_SOC)
-            opti.set_initial(self._SOH, self._prev_SOH)
             opti.set_initial(self._TEMP, self._prev_TEMP)
         else:
-            opti.set_initial(self._P_chg, p_chg_ref[:Nc])
-            opti.set_initial(self._P_dis, p_dis_ref[:Nc])
-            opti.set_initial(self._P_reg, p_reg_ref[:Nc])
+            opti.set_initial(self._P_chg, 0.0)
+            opti.set_initial(self._P_dis, 0.0)
+            opti.set_initial(self._P_reg, 0.0)
             opti.set_initial(self._SOC, soc_ref)
-            opti.set_initial(self._SOH, soh_ref)
-            opti.set_initial(self._TEMP, temp_ref)
+            opti.set_initial(self._TEMP, temp_0_val)
         opti.set_initial(self._eps, 0.0)
         opti.set_initial(self._eps_temp, 0.0)
 
@@ -324,7 +332,6 @@ class TrackingMPC:
             pd = np.array(sol.value(self._P_dis)).flatten()
             pr = np.array(sol.value(self._P_reg)).flatten()
             soc_opt = np.array(sol.value(self._SOC)).flatten()
-            soh_opt = np.array(sol.value(self._SOH)).flatten()
             temp_opt = np.array(sol.value(self._TEMP)).flatten()
 
             u_cmd = np.array([pc[0], pd[0], pr[0]])
@@ -334,7 +341,6 @@ class TrackingMPC:
             self._prev_P_dis = np.append(pd[1:], pd[-1])
             self._prev_P_reg = np.append(pr[1:], pr[-1])
             self._prev_SOC = np.append(soc_opt[1:], soc_opt[-1])
-            self._prev_SOH = np.append(soh_opt[1:], soh_opt[-1])
             self._prev_TEMP = np.append(temp_opt[1:], temp_opt[-1])
 
         except RuntimeError as exc:

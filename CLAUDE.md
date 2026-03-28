@@ -1,7 +1,6 @@
 ## Current State
-- Completed: v1, v2, v3, v4 (4-stage gate passed: validation, evaluation, comparison, stress testing)
-- Next: v5
-- Frozen (do not modify): v1, v2, v3, v4
+- Completed and frozen: v1, v2, v3, v4 (4-stage gate passed — do not modify)
+- In development: v5
 - Gate reports: see backlog.md
 
 ## If context is unclear Re-read this file top to bottom. Ask me to confirm the current version.
@@ -30,6 +29,8 @@ Use modular architecture, type hints, docstrings, configuration files, logging, 
 Prefer the smallest implementation that meaningfully advances the system. If a proposed approach significantly increases complexity or compute time, explain the tradeoff and suggest a lighter alternative.
 6. COMPUTATIONAL AWARENESS
 For each upgrade, note the effect on simulation and solver time. Ensure the system remains tractable. Flag any upgrade that risks making real-time operation infeasible.
+7. SHOW YOUR PLAN BEFORE TOUCHING CODE
+For any non-trivial change (NLP reformulation, architecture change, new feature), first explain: what you will change, why, what files are affected, and what the risks are. Wait for confirmation before writing code. Never silently start implementing — the user needs to see and approve the plan.
 ────────────────────────────────────────
 VERSIONING STRUCTURE
 ────────────────────────────────────────

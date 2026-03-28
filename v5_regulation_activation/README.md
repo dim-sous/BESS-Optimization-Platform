@@ -17,7 +17,7 @@ Adds a fast **PI controller** between MPC and the plant, creating a 4-level cont
 | **Revenue model** | Arbitrage + capacity bidding | Arbitrage + capacity + delivery revenue − penalties |
 | **Strategy comparison** | Single strategy | `--strategy full\|ems_only\|no_regulation` |
 | **EMS** | Arbitrage + capacity commitment | Adds SOC headroom margin for regulation delivery |
-| **MPC** | SOC tracking | Adds headroom band to maintain regulation capacity |
+| **MPC** | 3-state (SOC, SOH, T) tracking | 2-state (SOC, T) + SOH frozen as parameter |
 
 **Unchanged**: 5-state model (SOC, SOH, T, V_rc1, V_rc2), 2RC circuit, OCV polynomial, pack architecture (4 cells, active balancing), EKF/MHE estimation.
 
@@ -72,7 +72,7 @@ v5_regulation_activation/
 ├── ems/
 │   └── economic_ems.py           # Hourly planning with SOC headroom for regulation
 ├── mpc/
-│   └── tracking_mpc.py           # SOC tracking with headroom band
+│   └── tracking_mpc.py           # 2-state MPC (SOC, T) with SOH as parameter
 ├── pi/
 │   └── regulation_pi.py          # Fast PI controller for activation signal tracking
 ├── estimation/
@@ -108,4 +108,4 @@ uv run python v5_regulation_activation/stress_test.py
 
 ## Status
 
-**Early development** — not yet gated. See `backlog.md` for gate process.
+**In development** — MPC simplified (2-state, 24% faster solves). Pending stress testing and gate review. See `backlog.md` for gate process.

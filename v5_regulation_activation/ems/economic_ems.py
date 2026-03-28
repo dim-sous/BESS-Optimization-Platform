@@ -179,7 +179,7 @@ class EconomicEMS:
                     P_chg[s][k] + P_dis[s][k] + P_reg[s][k]
                 ) * self.tp.dt_ems
 
-                # v5: SOC headroom penalty — discourage P_reg when SOC
+                # SOC headroom penalty — discourage P_reg when SOC
                 # is within reg_soc_margin of its bounds.  The battery
                 # needs headroom to deliver ±P_reg in real time.
                 soc_margin_low = SOC[s][k] - bp.SOC_min

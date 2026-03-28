@@ -441,8 +441,6 @@ class MultiRateSimulator:
                     N_pred = self.mp.N_mpc
 
                     soc_win = self._extract_ref(soc_ref_mpc_local, off, N_pred + 1)
-                    soh_win = self._extract_ref(soh_ref_mpc_local, off, N_pred + 1)
-                    temp_win = self._extract_ref(temp_ref_mpc_local, off, N_pred + 1)
                     pc_win = self._extract_ref(p_chg_ref_mpc_local, off, N_pred)
                     pd_win = self._extract_ref(p_dis_ref_mpc_local, off, N_pred)
                     pr_win = self._extract_ref(p_reg_ref_mpc_local, off, N_pred)
@@ -455,8 +453,6 @@ class MultiRateSimulator:
                     u_mpc = self.mpc.solve(
                         x_est=ekf_est,
                         soc_ref=soc_win,
-                        soh_ref=soh_win,
-                        temp_ref=temp_win,
                         p_chg_ref=pc_win,
                         p_dis_ref=pd_win,
                         p_reg_ref=pr_win,

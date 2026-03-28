@@ -6,8 +6,7 @@ stochastic activation signals at 4s resolution.  New control layer:
     EMS (3600s) -> MPC (60s) -> PI Controller (4s) -> Plant (4s)
 
 New parameter classes: PIParams, RegulationParams, Strategy.
-Changes: dt_sim -> 4s, EMSParams gains reg_soc_margin, MPCParams gains
-Q_headroom and headroom_band.
+Changes: dt_sim -> 4s, MPC simplified to 2-state (SOC, T) with SOH frozen.
 
 All physical units are SI-consistent and explicitly documented:
   - Energy:  kWh
@@ -198,7 +197,7 @@ class TimeParams:
 class EMSParams:
     """Parameters for the stochastic Energy Management System optimizer.
 
-    v5: adds reg_soc_margin for regulation delivery headroom awareness.
+    v5: adds reg_soc_margin and expected_activation_frac for regulation.
     """
 
     N_ems: int = 24                    # Planning horizon  [hours / steps at dt_ems]
@@ -216,23 +215,20 @@ class EMSParams:
 class MPCParams:
     """Tuning parameters for the nonlinear tracking MPC.
 
-    v5: adds regulation headroom cost to keep SOC away from limits
-    when regulation capacity is committed.
+    Simplified 2-state MPC (SOC, T) with SOH as frozen parameter.
+    Objective: SOC tracking (state feedback) + power tracking (economic timing)
+    + rate-of-change smoothness.
+    Temperature predicted for constraint enforcement only (no tracking term).
     """
 
     N_mpc: int = 60                    # Prediction horizon  [steps at dt_mpc]
     Nc_mpc: int = 20                   # Control horizon  [steps at dt_mpc]
     Q_soc: float = 1e4                 # SOC tracking weight
-    Q_soh: float = 1e2                 # SOH tracking weight
-    Q_temp: float = 1e2                # Temperature tracking weight
     R_power: float = 1.0               # Power reference tracking weight (per input)
     R_delta: float = 10.0              # Control rate-of-change penalty
     Q_terminal: float = 1e5            # Terminal SOC penalty
-    Q_headroom: float = 1e3            # Regulation headroom cost weight  [v5]
-    headroom_band: float = 0.05        # SOC band width for headroom  [-]  [v5]
     slack_penalty: float = 1e6         # Soft SOC constraint violation penalty
     slack_penalty_temp: float = 1e5    # Soft temperature constraint penalty
-    slack_penalty_volt: float = 1e5    # Soft voltage constraint penalty  [v4]
     n_blend_steps: int = 5             # EMS boundary reference smoothing  [MPC steps]
 
 
