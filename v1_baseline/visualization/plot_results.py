@@ -1,17 +1,15 @@
-"""Four-panel result visualisation for the hierarchical BESS platform.
+"""Four-panel result visualisation for v1 baseline.
 
-Panel layout (2 rows x 2 columns)
-----------------------------------
+Panel layout (2 x 2)
+---------------------
   [0,0] SOC: true vs EKF vs MHE       |  [0,1] SOH: true vs EKF vs MHE
-  [1,0] Net grid power + regulation    |  [1,1] Cumulative profit breakdown
-        + energy price overlay
+  [1,0] Power dispatch + P_reg + price |  [1,1] Cumulative profit breakdown
 
-Design notes
-------------
-- Net grid power panel uses green/red fill to show selling/buying
-  periods, with regulation power as an orange step line and a
-  dual y-axis energy price overlay for arbitrage context.
-- Large fonts and thick lines for readability in presentations.
+Trace conventions (shared across all versions):
+  True   — solid black
+  EKF    — dashed blue
+  MHE    — dotted red
+  EMS ref — step gray, semi-transparent
 """
 
 from __future__ import annotations
@@ -24,33 +22,34 @@ from config.parameters import BatteryParams
 
 
 # ---------------------------------------------------------------------------
-#  Global style constants
+#  Style — shared conventions across all versions
 # ---------------------------------------------------------------------------
-_TITLE_SIZE = 16
-_SUPTITLE_SIZE = 18
-_LABEL_SIZE = 13
-_TICK_SIZE = 11
-_LEGEND_SIZE = 10
-_LW_TRUE = 2.0          # true / primary curves
-_LW_EST = 1.5           # estimator curves
-_LW_REF = 2.5           # EMS reference (step)
-_LW_MPC = 1.0           # MPC applied (dense, thinner)
-_ALPHA_REF = 0.45        # transparency for reference step lines
+_TITLE = 14
+_SUPTITLE = 16
+_LABEL = 12
+_TICK = 10
+_LEGEND = 9
+_LW = 2.0
+_LW_EST = 1.5
+
+# Trace styles (uniform across versions)
+_TRUE_KW = dict(color="k", lw=_LW, ls="-")
+_EKF_KW = dict(color="tab:blue", lw=_LW_EST, ls="--")
+_MHE_KW = dict(color="tab:red", lw=_LW_EST, ls=":")
+_EMS_KW = dict(color="0.5", lw=1.8, ls="-", alpha=0.4, drawstyle="steps-pre")
 
 
-def _stepify(
-    t: np.ndarray, y: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Expand (t, y) into step-plot coordinates for use with fill_between."""
+def _step(t: np.ndarray, y: np.ndarray):
+    """Step-plot coordinates for fill_between."""
     n = len(t)
     dt = float(t[1] - t[0]) if n > 1 else 1.0
-    t_s = np.empty(2 * n)
-    y_s = np.empty(2 * n)
-    t_s[0::2] = t
-    t_s[1::2] = np.append(t[1:], t[-1] + dt)
-    y_s[0::2] = y
-    y_s[1::2] = y
-    return t_s, y_s
+    ts = np.empty(2 * n)
+    ys = np.empty(2 * n)
+    ts[0::2] = t
+    ts[1::2] = np.append(t[1:], t[-1] + dt)
+    ys[0::2] = y
+    ys[1::2] = y
+    return ts, ys
 
 
 def plot_results(
@@ -58,179 +57,102 @@ def plot_results(
     bp: BatteryParams,
     save_path: str = "results.png",
 ) -> None:
-    """Generate the four-panel summary figure.
-
-    Parameters
-    ----------
-    sim : dict
-        Output from ``MultiRateSimulator.run()``.
-    bp : BatteryParams
-    save_path : str
-        File path for the saved figure.
-    """
+    """Generate the four-panel summary figure."""
     plt.rcParams.update({
-        "font.size": _TICK_SIZE,
-        "axes.titlesize": _TITLE_SIZE,
-        "axes.labelsize": _LABEL_SIZE,
-        "xtick.labelsize": _TICK_SIZE,
-        "ytick.labelsize": _TICK_SIZE,
-        "legend.fontsize": _LEGEND_SIZE,
+        "font.size": _TICK, "axes.titlesize": _TITLE,
+        "axes.labelsize": _LABEL, "xtick.labelsize": _TICK,
+        "ytick.labelsize": _TICK, "legend.fontsize": _LEGEND,
     })
 
-    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
-    fig.suptitle(
-        "Hierarchical BESS Control \u2014 24 h Multi-Rate Simulation",
-        fontsize=_SUPTITLE_SIZE,
-        fontweight="bold",
-        y=0.995,
-    )
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle("v1 Baseline — 24 h Simulation",
+                 fontsize=_SUPTITLE, fontweight="bold", y=0.995)
 
-    t_sim_h = sim["time_sim"] / 3600.0           # plant time in hours
-    t_mpc_h = sim["time_mpc"] / 3600.0           # estimator / MPC time in hours
+    t_sim = sim["time_sim"] / 3600.0
+    t_mpc = sim["time_mpc"] / 3600.0
+    dt_mpc = float(t_mpc[1] - t_mpc[0]) if len(t_mpc) > 1 else 60.0 / 3600.0
 
-    # ==================================================================
-    #  Panel [0,0] — SOC: true vs EKF vs MHE
-    # ==================================================================
+    # EMS reference SOC (hourly first-stage setpoints stitched together)
+    ems_soc_refs = sim.get("ems_soc_refs")
+
+    # ── SOC ──────────────────────────────────────────────────────────────
     ax = axes[0, 0]
-    ax.plot(t_sim_h, sim["soc_true"], color="0.35", linewidth=_LW_TRUE,
-            label="True SOC")
-    ax.plot(t_mpc_h, sim["soc_ekf"], color="tab:blue", linewidth=_LW_EST,
-            label="EKF estimate")
+    ax.plot(t_sim, sim["soc_true"], **_TRUE_KW, label="True")
+    ax.plot(t_mpc, sim["soc_ekf"], **_EKF_KW, label="EKF")
     if np.any(sim["soc_mhe"] != 0):
-        ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
-                linestyle="--", label="MHE estimate")
-    ax.axhspan(bp.SOC_min, bp.SOC_max, alpha=0.08, color="green",
-               label=f"SOC limits [{bp.SOC_min:.0%}\u2013{bp.SOC_max:.0%}]")
-    ax.set_ylabel("SOC [-]")
-    ax.set_ylim(-0.02, 1.02)
+        ax.plot(t_mpc, sim["soc_mhe"], **_MHE_KW, label="MHE")
+    if ems_soc_refs is not None and len(ems_soc_refs) > 0:
+        soc_plan = np.array([ref[1] for ref in ems_soc_refs])
+        t_ems = np.arange(1, len(soc_plan) + 1)
+        ax.plot(t_ems, soc_plan, **_EMS_KW, label="EMS plan")
+    ax.axhspan(bp.SOC_min, bp.SOC_max, alpha=0.07, color="green",
+               label=f"Limits [{bp.SOC_min:.0%}–{bp.SOC_max:.0%}]")
+    ax.set(ylabel="SOC [-]", ylim=(-0.02, 1.02))
+    ax.set_title("State of Charge")
     ax.legend(loc="upper right")
-    ax.set_title("State of Charge Estimation")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
-    # ==================================================================
-    #  Panel [0,1] — SOH: true vs EKF vs MHE
-    # ==================================================================
+    # ── SOH ──────────────────────────────────────────────────────────────
     ax = axes[0, 1]
-    ax.plot(t_sim_h, sim["soh_true"], color="0.35", linewidth=_LW_TRUE,
-            label="True SOH")
-    ax.plot(t_mpc_h, sim["soh_ekf"], color="tab:blue", linewidth=_LW_EST,
-            label="EKF estimate")
+    ax.plot(t_sim, sim["soh_true"], **_TRUE_KW, label="True")
+    ax.plot(t_mpc, sim["soh_ekf"], **_EKF_KW, label="EKF")
     if np.any(sim["soh_mhe"] != 0):
-        ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
-                linestyle="--", label="MHE estimate")
-    ax.set_ylabel("SOH [-]")
+        ax.plot(t_mpc, sim["soh_mhe"], **_MHE_KW, label="MHE")
+    ax.set(ylabel="SOH [-]")
+    ax.set_title("State of Health")
     ax.legend(loc="lower left")
-    ax.set_title("State of Health Estimation")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
-    # ==================================================================
-    #  Shared computations for power / profit panels
-    # ==================================================================
-    n_mpc = len(sim["power_applied"])
-    dt_mpc_s = (sim["time_mpc"][1] - sim["time_mpc"][0]
-                if len(sim["time_mpc"]) > 1 else 60.0)
-    t_pow = np.arange(n_mpc) * dt_mpc_s / 3600.0
-
-    # Net grid power: positive = selling (discharge), negative = buying (charge)
-    net_grid_power = sim["power_applied"][:, 1] - sim["power_applied"][:, 0]
-
-    # Regulation power (always >= 0)
-    reg_power = sim["power_applied"][:, 2]
-
-    # Stitch EMS first-stage references into hourly time series
-    ems_p_chg = sim.get("ems_p_chg_refs", [])
-    ems_p_dis = sim.get("ems_p_dis_refs", [])
-    ems_p_reg = sim.get("ems_p_reg_refs", [])
-    all_chg, all_dis, all_reg = [], [], []
-    if ems_p_chg:
-        for pc, pd, pr in zip(ems_p_chg, ems_p_dis, ems_p_reg):
-            all_chg.append(pc[0])
-            all_dis.append(pd[0])
-            all_reg.append(pr[0])
-    t_ems_h = np.arange(len(all_chg)) if all_chg else np.array([])
-
-    # Prices
-    prices_e = sim.get("prices_energy", None)
-    n_price_hours = 0
-    t_price = np.array([])
-    if prices_e is not None:
-        n_price_hours = min(len(prices_e), int(t_sim_h[-1]) + 1)
-        t_price = np.arange(n_price_hours)
-
-    # ==================================================================
-    #  Panel [1,0] — Net Grid Power + Regulation + Price Overlay
-    # ==================================================================
+    # ── Power dispatch + P_reg + price ───────────────────────────────────
     ax = axes[1, 0]
-
-    # Green/red fill for sell/buy regions
-    ts, ys = _stepify(t_pow, net_grid_power)
-    ax.fill_between(ts, ys, 0, where=(ys >= 0),
-                    color="tab:green", alpha=0.25, label="Selling to grid",
-                    interpolate=True)
-    ax.fill_between(ts, ys, 0, where=(ys < 0),
-                    color="tab:red", alpha=0.25, label="Buying from grid",
-                    interpolate=True)
-    ax.plot(ts, ys, color="k", linewidth=1.0, label="Net grid power")
-
-    # Regulation power (MPC applied)
-    ax.step(t_pow, reg_power, where="post",
-            color="tab:orange", linewidth=_LW_MPC, label="P_reg applied")
-
-    # EMS references
-    if all_chg:
-        ems_net = np.array(all_dis) - np.array(all_chg)
-        ax.step(t_ems_h, ems_net, where="post",
-                color="0.3", linewidth=_LW_REF, alpha=0.5,
-                linestyle="--", label="EMS net ref")
-    if all_reg:
-        ax.step(t_ems_h, all_reg, where="post",
-                color="tab:orange", linewidth=_LW_REF, alpha=_ALPHA_REF,
-                linestyle="--", label="EMS P_reg ref")
-
-    ax.axhline(0, color="k", linewidth=0.6, linestyle=":")
-    ax.set_ylabel("Power [kW]  (+ sell / \u2212 buy)")
-    ax.set_xlabel("Time [h]")
+    n_mpc = len(sim["power_applied"])
+    t_pow = np.arange(n_mpc) * dt_mpc
+    net = sim["power_applied"][:, 1] - sim["power_applied"][:, 0]
+    reg = sim["power_applied"][:, 2]
+    ts, ys = _step(t_pow, net)
+    ax.fill_between(ts, ys, 0, where=(ys >= 0), color="tab:green",
+                    alpha=0.25, label="Sell", interpolate=True)
+    ax.fill_between(ts, ys, 0, where=(ys < 0), color="tab:red",
+                    alpha=0.25, label="Buy", interpolate=True)
+    ax.plot(ts, ys, color="k", lw=0.8)
+    ax.step(t_pow, reg, where="post", color="tab:orange", lw=1.0,
+            label="P_reg committed")
+    ax.axhline(0, color="k", lw=0.4, ls=":")
+    ax.set(ylabel="Power [kW]  (+ sell / − buy)", xlabel="Time [h]")
+    ax.set_title("Grid Power Exchange")
     ax.legend(loc="upper left", ncol=2)
-    ax.set_title("Grid Power Exchange and Regulation Reserve")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
-    # Dual y-axis: energy price overlay
+    prices_e = sim.get("prices_energy")
     if prices_e is not None:
+        n_ph = min(len(prices_e), int(t_sim[-1]) + 1)
         ax2 = ax.twinx()
-        ax2.step(t_price, prices_e[:n_price_hours], where="post",
-                 color="tab:purple", linewidth=1.0, alpha=0.4, linestyle="-.")
-        ax2.set_ylabel("Energy Price [$/kWh]", color="tab:purple", alpha=0.6)
-        ax2.tick_params(axis="y", colors="tab:purple", labelsize=_TICK_SIZE)
+        ax2.step(np.arange(n_ph), prices_e[:n_ph], where="post",
+                 color="tab:purple", lw=1.3, alpha=0.7, ls="-.")
+        ax2.set_ylabel("E[Price] [$/kWh]", color="tab:purple", alpha=0.8)
+        ax2.tick_params(axis="y", colors="tab:purple")
 
-    # ==================================================================
-    #  Panel [1,1] — Cumulative profit breakdown
-    # ==================================================================
+    # ── Profit breakdown ─────────────────────────────────────────────────
     ax = axes[1, 1]
     n_prof = len(sim["cumulative_profit"])
-    t_prof = np.arange(n_prof) * dt_mpc_s / 3600.0
-
-    cum_energy = np.cumsum(sim["energy_profit"])
-    cum_reg = np.cumsum(sim["reg_profit"])
-    cum_deg = np.cumsum(sim["deg_cost"])
-
-    ax.plot(t_prof, cum_energy, color="tab:blue", linewidth=_LW_EST,
-            label="Energy arbitrage")
-    ax.plot(t_prof, cum_reg, color="tab:orange", linewidth=_LW_EST,
-            label="Regulation revenue")
-    ax.plot(t_prof, -cum_deg, color="tab:red", linewidth=_LW_EST,
-            label="Degradation cost")
-    ax.plot(t_prof, sim["cumulative_profit"], color="k", linewidth=_LW_TRUE,
-            label=f"Net profit (${sim['total_profit']:.2f})")
-    ax.axhline(0, color="k", linewidth=0.4, linestyle=":")
-    ax.set_ylabel("Cumulative [$]")
-    ax.set_xlabel("Time [h]")
-    ax.legend(loc="upper left")
+    t_prof = np.arange(n_prof) * dt_mpc
+    ax.plot(t_prof, np.cumsum(sim["energy_profit"]), color="tab:blue",
+            lw=_LW_EST, label="Energy arb.")
+    ax.plot(t_prof, np.cumsum(sim["reg_profit"]), color="tab:orange",
+            lw=_LW_EST, label="Regulation")
+    ax.plot(t_prof, -np.cumsum(sim["deg_cost"]), color="tab:red",
+            lw=_LW_EST, label="Degradation")
+    ax.plot(t_prof, sim["cumulative_profit"], color="k", lw=_LW,
+            label=f"Net ${sim['total_profit']:.2f}")
+    ax.axhline(0, color="k", lw=0.4, ls=":")
+    ax.set(ylabel="Cumulative [$]", xlabel="Time [h]")
     ax.set_title("Revenue Breakdown")
+    ax.legend(loc="upper left")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
     plt.tight_layout()
     fig.savefig(save_path, dpi=180, bbox_inches="tight")

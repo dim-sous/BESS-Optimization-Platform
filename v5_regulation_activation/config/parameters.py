@@ -311,7 +311,7 @@ class EKFParams:
 
     # Process noise covariance  Q  (5x5 diagonal in v4)
     q_soc: float = 1e-6               # SOC process noise variance
-    q_soh: float = 1e-8               # SOH process noise variance (reflects degradation model uncertainty)
+    q_soh: float = 1e-12              # SOH process noise variance (extremely slow dynamics)
     q_temp: float = 1e-4               # Temperature process noise variance  [degC^2]
     q_vrc1: float = 1e-4               # V_rc1 process noise variance  [V^2]  [v4]
     q_vrc2: float = 1e-5               # V_rc2 process noise variance  [V^2]  [v4]
@@ -323,7 +323,7 @@ class EKFParams:
 
     # Initial state error covariance  P_0  (5x5 diagonal in v4)
     p0_soc: float = 1e-3              # Initial SOC uncertainty
-    p0_soh: float = 1e-4              # Initial SOH uncertainty (SOH starts near 1.0 with moderate confidence)
+    p0_soh: float = 1e-2              # Initial SOH uncertainty (larger — unknown)
     p0_temp: float = 1.0              # Initial temperature uncertainty  [degC^2]
     p0_vrc1: float = 1.0              # Initial V_rc1 uncertainty  [V^2]  [v4]
     p0_vrc2: float = 1.0              # Initial V_rc2 uncertainty  [V^2]  [v4]

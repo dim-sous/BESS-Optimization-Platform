@@ -6,9 +6,6 @@ venv/
 *.egg-info/
 dist/
 build/
-results.png
-results/*.npz
-results/*.json
-results/*.csv
-results/*.png
+results/
 .ipynb_checkpoints/
+.vscode/

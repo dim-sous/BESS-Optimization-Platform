@@ -1,9 +1,16 @@
-"""Four-panel result visualisation for the v2 thermal model.
+"""Six-panel result visualisation for v2 thermal model.
 
-Panel layout (2 rows x 2 columns)
-----------------------------------
-  [0,0] SOC: true vs EKF vs MHE       |  [0,1] Temperature: true vs EKF/MHE
-  [1,0] SOH: true vs EKF vs MHE       |  [1,1] Power dispatch + price
+Panel layout (3 x 2)
+---------------------
+  [0,0] SOC: true vs EKF vs MHE       |  [0,1] SOH: true vs EKF vs MHE
+  [1,0] Temperature (v2 hero)          |  [1,1] Power dispatch + P_reg + price
+  [2,0] empty (reserved)               |  [2,1] Cumulative profit breakdown
+
+Trace conventions (shared across all versions):
+  True   — solid black
+  EKF    — dashed blue
+  MHE    — dotted red
+  EMS ref — step gray, semi-transparent
 """
 
 from __future__ import annotations
@@ -16,32 +23,29 @@ from config.parameters import BatteryParams, ThermalParams
 
 
 # ---------------------------------------------------------------------------
-#  Global style constants
+#  Style — shared conventions across all versions
 # ---------------------------------------------------------------------------
-_TITLE_SIZE = 15
-_SUPTITLE_SIZE = 17
-_LABEL_SIZE = 12
-_TICK_SIZE = 11
-_LEGEND_SIZE = 9
-_LW_TRUE = 2.2
-_LW_EST = 1.6
-_LW_MPC = 1.0
-_ALPHA_REF = 0.45
+_TITLE = 14
+_SUPTITLE = 16
+_LABEL = 12
+_TICK = 10
+_LEGEND = 9
+_LW = 2.0
+_LW_EST = 1.5
+
+_TRUE_KW = dict(color="k", lw=_LW, ls="-")
+_EKF_KW = dict(color="tab:blue", lw=_LW_EST, ls="--")
+_MHE_KW = dict(color="tab:red", lw=_LW_EST, ls=":")
+_EMS_KW = dict(color="0.5", lw=1.8, ls="-", alpha=0.4, drawstyle="steps-pre")
 
 
-def _stepify(
-    t: np.ndarray, y: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Expand (t, y) into step-plot coordinates for use with fill_between."""
+def _step(t: np.ndarray, y: np.ndarray):
     n = len(t)
     dt = float(t[1] - t[0]) if n > 1 else 1.0
-    t_s = np.empty(2 * n)
-    y_s = np.empty(2 * n)
-    t_s[0::2] = t
-    t_s[1::2] = np.append(t[1:], t[-1] + dt)
-    y_s[0::2] = y
-    y_s[1::2] = y
-    return t_s, y_s
+    ts = np.empty(2 * n); ys = np.empty(2 * n)
+    ts[0::2] = t; ts[1::2] = np.append(t[1:], t[-1] + dt)
+    ys[0::2] = y; ys[1::2] = y
+    return ts, ys
 
 
 def plot_results(
@@ -50,136 +54,119 @@ def plot_results(
     thp: ThermalParams,
     save_path: str = "results.png",
 ) -> None:
-    """Generate the four-panel summary figure.
-
-    Parameters
-    ----------
-    sim : dict
-        Output from ``MultiRateSimulator.run()``.
-    bp  : BatteryParams
-    thp : ThermalParams
-    save_path : str
-    """
+    """Generate the six-panel summary figure."""
     plt.rcParams.update({
-        "font.size": _TICK_SIZE,
-        "axes.titlesize": _TITLE_SIZE,
-        "axes.labelsize": _LABEL_SIZE,
-        "xtick.labelsize": _TICK_SIZE,
-        "ytick.labelsize": _TICK_SIZE,
-        "legend.fontsize": _LEGEND_SIZE,
+        "font.size": _TICK, "axes.titlesize": _TITLE,
+        "axes.labelsize": _LABEL, "xtick.labelsize": _TICK,
+        "ytick.labelsize": _TICK, "legend.fontsize": _LEGEND,
     })
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 11))
-    fig.suptitle(
-        "BESS Digital Twin — v2 Thermal Model — 24 h",
-        fontsize=_SUPTITLE_SIZE, fontweight="bold", y=0.995,
-    )
+    fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+    fig.suptitle("v2 Thermal Model — 24 h Simulation",
+                 fontsize=_SUPTITLE, fontweight="bold", y=0.995)
 
-    t_sim_h = sim["time_sim"] / 3600.0
-    t_mpc_h = sim["time_mpc"] / 3600.0
-    dt_mpc_s = (sim["time_mpc"][1] - sim["time_mpc"][0]
-                if len(sim["time_mpc"]) > 1 else 60.0)
+    t_sim = sim["time_sim"] / 3600.0
+    t_mpc = sim["time_mpc"] / 3600.0
+    dt_mpc = float(t_mpc[1] - t_mpc[0]) if len(t_mpc) > 1 else 60.0 / 3600.0
+    ems_soc_refs = sim.get("ems_soc_refs")
 
-    # ==================================================================
-    #  Panel [0,0] — SOC: true vs EKF vs MHE
-    # ==================================================================
+    # ── SOC ──────────────────────────────────────────────────────────────
     ax = axes[0, 0]
-    ax.plot(t_sim_h, sim["soc_true"], color="0.25", linewidth=_LW_TRUE,
-            label="True SOC")
-    ax.plot(t_mpc_h, sim["soc_ekf"], color="tab:blue", linewidth=_LW_EST,
-            label="EKF")
+    ax.plot(t_sim, sim["soc_true"], **_TRUE_KW, label="True")
+    ax.plot(t_mpc, sim["soc_ekf"], **_EKF_KW, label="EKF")
     if np.any(sim["soc_mhe"] != 0):
-        ax.plot(t_mpc_h, sim["soc_mhe"], color="tab:red", linewidth=_LW_EST,
-                linestyle="--", label="MHE")
-    ax.axhspan(bp.SOC_min, bp.SOC_max, alpha=0.08, color="green",
+        ax.plot(t_mpc, sim["soc_mhe"], **_MHE_KW, label="MHE")
+    if ems_soc_refs is not None and len(ems_soc_refs) > 0:
+        soc_plan = np.array([ref[1] for ref in ems_soc_refs])
+        t_ems = np.arange(1, len(soc_plan) + 1)
+        ax.plot(t_ems, soc_plan, **_EMS_KW, label="EMS plan")
+    ax.axhspan(bp.SOC_min, bp.SOC_max, alpha=0.07, color="green",
                label=f"Limits [{bp.SOC_min:.0%}–{bp.SOC_max:.0%}]")
-    ax.set_ylabel("SOC [-]")
-    ax.set_ylim(-0.02, 1.02)
-    ax.legend(loc="upper right")
+    ax.set(ylabel="SOC [-]", ylim=(-0.02, 1.02))
     ax.set_title("State of Charge")
-    ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
-
-    # ==================================================================
-    #  Panel [0,1] — Temperature: true vs EKF vs MHE  (v2 hero)
-    # ==================================================================
-    ax = axes[0, 1]
-    ax.plot(t_sim_h, sim["temp_true"], color="0.25", linewidth=_LW_TRUE,
-            label="True T")
-    ax.plot(t_mpc_h, sim["temp_ekf"], color="tab:blue", linewidth=_LW_EST,
-            label="EKF T")
-    if np.any(sim["temp_mhe"] != 0):
-        ax.plot(t_mpc_h, sim["temp_mhe"], color="tab:red", linewidth=_LW_EST,
-                linestyle="--", label="MHE T")
-    ax.axhline(thp.T_max, color="red", linewidth=1.2, linestyle=":",
-               label=f"T_max = {thp.T_max:.0f} °C")
-    ax.axhline(thp.T_ambient, color="green", linewidth=1.0, linestyle=":",
-               alpha=0.6, label=f"T_amb = {thp.T_ambient:.0f} °C")
-    ax.set_ylabel("Temperature [°C]")
     ax.legend(loc="upper right")
-    ax.set_title("Cell Temperature Estimation")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
-    # ==================================================================
-    #  Panel [1,0] — SOH: true vs EKF vs MHE
-    # ==================================================================
-    ax = axes[1, 0]
-    ax.plot(t_sim_h, sim["soh_true"], color="0.25", linewidth=_LW_TRUE,
-            label="True SOH")
-    ax.plot(t_mpc_h, sim["soh_ekf"], color="tab:blue", linewidth=_LW_EST,
-            label="EKF")
+    # ── SOH ──────────────────────────────────────────────────────────────
+    ax = axes[0, 1]
+    ax.plot(t_sim, sim["soh_true"], **_TRUE_KW, label="True")
+    ax.plot(t_mpc, sim["soh_ekf"], **_EKF_KW, label="EKF")
     if np.any(sim["soh_mhe"] != 0):
-        ax.plot(t_mpc_h, sim["soh_mhe"], color="tab:red", linewidth=_LW_EST,
-                linestyle="--", label="MHE")
-    ax.set_ylabel("SOH [-]")
-    ax.set_xlabel("Time [h]")
-    ax.legend(loc="lower left")
+        ax.plot(t_mpc, sim["soh_mhe"], **_MHE_KW, label="MHE")
+    ax.set(ylabel="SOH [-]")
     ax.set_title("State of Health")
+    ax.legend(loc="lower left")
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
-    # ==================================================================
-    #  Panel [1,1] — Power Dispatch + Price
-    # ==================================================================
+    # ── Temperature (hero) ───────────────────────────────────────────────
+    ax = axes[1, 0]
+    ax.plot(t_sim, sim["temp_true"], **_TRUE_KW, label="True")
+    ax.plot(t_mpc, sim["temp_ekf"], **_EKF_KW, label="EKF")
+    if np.any(sim["temp_mhe"] != 0):
+        ax.plot(t_mpc, sim["temp_mhe"], **_MHE_KW, label="MHE")
+    ax.axhline(thp.T_max, color="red", lw=1.0, ls=":",
+               label=f"T_max = {thp.T_max:.0f} °C")
+    ax.axhline(thp.T_ambient, color="green", lw=0.8, ls=":", alpha=0.5,
+               label=f"T_amb = {thp.T_ambient:.0f} °C")
+    ax.set(ylabel="Temperature [°C]")
+    ax.set_title("Cell Temperature (v2 upgrade)")
+    ax.legend(loc="upper right")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(True, alpha=0.25)
+
+    # ── Power dispatch + P_reg + price ───────────────────────────────────
     ax = axes[1, 1]
     n_mpc = len(sim["power_applied"])
-    t_pow = np.arange(n_mpc) * dt_mpc_s / 3600.0
-    net_grid_power = sim["power_applied"][:, 1] - sim["power_applied"][:, 0]
-
-    ts, ys = _stepify(t_pow, net_grid_power)
-    ax.fill_between(ts, ys, 0, where=(ys >= 0),
-                    color="tab:green", alpha=0.25, label="Selling",
-                    interpolate=True)
-    ax.fill_between(ts, ys, 0, where=(ys < 0),
-                    color="tab:red", alpha=0.25, label="Buying",
-                    interpolate=True)
-    ax.plot(ts, ys, color="k", linewidth=0.9, label="Net grid power")
-
-    # Profit annotation
-    total = sim.get("total_profit", 0.0)
-    ax.annotate(f"Net profit: ${total:.2f}", xy=(0.02, 0.95),
-                xycoords="axes fraction", fontsize=_LEGEND_SIZE + 1,
-                fontweight="bold", va="top",
-                bbox=dict(boxstyle="round,pad=0.3", fc="wheat", alpha=0.7))
-
-    ax.axhline(0, color="k", linewidth=0.6, linestyle=":")
-    ax.set_ylabel("Power [kW]  (+ sell / − buy)")
-    ax.set_xlabel("Time [h]")
-    ax.legend(loc="upper right")
-    ax.set_title("Grid Power Dispatch")
+    t_pow = np.arange(n_mpc) * dt_mpc
+    net = sim["power_applied"][:, 1] - sim["power_applied"][:, 0]
+    reg = sim["power_applied"][:, 2]
+    ts, ys = _step(t_pow, net)
+    ax.fill_between(ts, ys, 0, where=(ys >= 0), color="tab:green",
+                    alpha=0.25, label="Sell", interpolate=True)
+    ax.fill_between(ts, ys, 0, where=(ys < 0), color="tab:red",
+                    alpha=0.25, label="Buy", interpolate=True)
+    ax.plot(ts, ys, color="k", lw=0.8)
+    ax.step(t_pow, reg, where="post", color="tab:orange", lw=1.0,
+            label="P_reg committed")
+    ax.axhline(0, color="k", lw=0.4, ls=":")
+    ax.set(ylabel="Power [kW]  (+ sell / − buy)", xlabel="Time [h]")
+    ax.set_title("Grid Power Exchange")
+    ax.legend(loc="upper left", ncol=2)
     ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
 
-    prices_e = sim.get("prices_energy", None)
+    prices_e = sim.get("prices_energy")
     if prices_e is not None:
-        n_price_hours = min(len(prices_e), int(t_sim_h[-1]) + 1)
-        t_price = np.arange(n_price_hours)
+        n_ph = min(len(prices_e), int(t_sim[-1]) + 1)
         ax2 = ax.twinx()
-        ax2.step(t_price, prices_e[:n_price_hours], where="post",
-                 color="tab:purple", linewidth=1.0, alpha=0.4, linestyle="-.")
-        ax2.set_ylabel("Price [$/kWh]", color="tab:purple", alpha=0.6)
-        ax2.tick_params(axis="y", colors="tab:purple", labelsize=_TICK_SIZE)
+        ax2.step(np.arange(n_ph), prices_e[:n_ph], where="post",
+                 color="tab:purple", lw=1.3, alpha=0.7, ls="-.")
+        ax2.set_ylabel("E[Price] [$/kWh]", color="tab:purple", alpha=0.8)
+        ax2.tick_params(axis="y", colors="tab:purple")
+
+    # ── [2,0] empty — hide axes ─────────────────────────────────────────
+    axes[2, 0].set_visible(False)
+
+    # ── Profit breakdown ─────────────────────────────────────────────────
+    ax = axes[2, 1]
+    n_prof = len(sim["cumulative_profit"])
+    t_prof = np.arange(n_prof) * dt_mpc
+    ax.plot(t_prof, np.cumsum(sim["energy_profit"]), color="tab:blue",
+            lw=_LW_EST, label="Energy arb.")
+    ax.plot(t_prof, np.cumsum(sim["reg_profit"]), color="tab:orange",
+            lw=_LW_EST, label="Regulation")
+    ax.plot(t_prof, -np.cumsum(sim["deg_cost"]), color="tab:red",
+            lw=_LW_EST, label="Degradation")
+    ax.plot(t_prof, sim["cumulative_profit"], color="k", lw=_LW,
+            label=f"Net ${sim['total_profit']:.2f}")
+    ax.axhline(0, color="k", lw=0.4, ls=":")
+    ax.set(ylabel="Cumulative [$]", xlabel="Time [h]")
+    ax.set_title("Revenue Breakdown")
+    ax.legend(loc="upper left")
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(True, alpha=0.25)
 
     plt.tight_layout()
     fig.savefig(save_path, dpi=180, bbox_inches="tight")

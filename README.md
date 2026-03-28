@@ -1,4 +1,4 @@
-# Energy Storage Optimization Platform
+# BESS Optimization Platform
 
 A production-grade Python platform for **optimal scheduling, real-time dispatch, and state estimation** of grid-connected battery energy storage systems (BESS). Optimizes **energy arbitrage** and **regulation capacity bidding** while actively managing battery degradation.
 

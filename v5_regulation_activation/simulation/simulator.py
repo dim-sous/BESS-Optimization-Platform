@@ -62,25 +62,17 @@ def interpolate_ems_to_mpc(
     dt_ems: float,
     dt_mpc: float,
 ) -> dict:
-    """Interpolate hourly EMS references to MPC resolution."""
+    """Expand hourly EMS references to MPC resolution via zero-order hold."""
     ratio = int(round(dt_ems / dt_mpc))
 
     p_chg = np.repeat(ems_result["P_chg_ref"], ratio)
     p_dis = np.repeat(ems_result["P_dis_ref"], ratio)
     p_reg = np.repeat(ems_result["P_reg_ref"], ratio)
 
-    soc_hourly = ems_result["SOC_ref"]
-    soh_hourly = ems_result["SOH_ref"]
-    temp_hourly = ems_result["TEMP_ref"]
-    N_hours = len(soc_hourly) - 1
-    N_mpc_pts = N_hours * ratio + 1
-
-    t_hourly = np.arange(N_hours + 1, dtype=np.float64)
-    t_mpc = np.linspace(0.0, N_hours, N_mpc_pts)
-
-    soc_mpc = np.interp(t_mpc, t_hourly, soc_hourly)
-    soh_mpc = np.interp(t_mpc, t_hourly, soh_hourly)
-    temp_mpc = np.interp(t_mpc, t_hourly, temp_hourly)
+    # State: zero-order hold (end-of-hour target held for the full hour)
+    soc_mpc = np.repeat(ems_result["SOC_ref"][1:], ratio)
+    soh_mpc = np.repeat(ems_result["SOH_ref"][1:], ratio)
+    temp_mpc = np.repeat(ems_result["TEMP_ref"][1:], ratio)
 
     return {
         "P_chg_ref_mpc": p_chg,
@@ -663,9 +655,9 @@ class MultiRateSimulator:
             "deg_cost": deg_cost_arr[:mpc_idx],
             "total_profit": total_profit,
             "soh_degradation": soh_true[0] - soh_true[-1],
-            # Prices
-            "prices_energy": energy_scenarios[0],
-            "prices_reg": reg_scenarios[0],
+            # Scenario prices (probability-weighted expected prices)
+            "prices_energy": (probabilities[:, None] * energy_scenarios).sum(axis=0),
+            "prices_reg": (probabilities[:, None] * reg_scenarios).sum(axis=0),
             # Timing
             "mpc_solve_times": mpc_solve_times[:mpc_idx],
             "est_solve_times": est_solve_times[:mpc_idx],
