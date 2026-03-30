@@ -1,5 +1,41 @@
 # Gate Review Backlog
 
+## Known Issues & Future Work
+
+### 1. Plant model: SOC clamping after integration (all versions)
+
+The BatteryCell/BatteryPack `step()` method clamps SOC after RK4 integration instead of limiting power before integration. When SOC hits limits, the integrator computes a physically impossible state (e.g. SOC = -0.30) and silently overwrites it to SOC_min. This corrupts all downstream state variables (temperature, degradation, RC voltages) because they're computed for a current that never flowed.
+
+**Fix:** Replace post-integration SOC clamping with pre-integration power limiting:
+```python
+max_discharge = (soc - SOC_min) * E_nom / dt * eta_discharge
+P_dis = min(P_dis_commanded, max_discharge)
+max_charge = (SOC_max - soc) * E_nom / dt / eta_charge
+P_chg = min(P_chg_commanded, max_charge)
+```
+Should propagate from v1 upward. The SOC-based energy accounting in v5 simulator.py would become redundant once fixed, since commanded power would always equal actual power.
+
+### 2. MPC is a reference tracker, not an optimizer (v5)
+
+The MPC objective is dominated by SOC tracking (Q_soc=1e4), which forces MPC to replicate EMS references. Power tracking weight (R_power=1.0) is 10,000x weaker. Result: MPC output ≈ EMS reference, same as what EMS_PI gets for free. 84-day comparison shows FULL optimizer margin over EMS_CLAMPS is <0.5%.
+
+**Formulation changes to test:**
+- Reduce Q_soc to ~1e2 (let MPC deviate from EMS within bounds)
+- Add energy price term to MPC objective (minute-level economic optimization)
+- Add regulation delivery reward/penalty to MPC objective
+- Consider economic MPC variant (profit-maximizing, not tracking)
+
+**Simulation scenarios that would stress-test MPC:**
+- Shorter battery duration (0.5h instead of 2h) — SOC management becomes critical
+- Higher regulation commitment relative to capacity
+- Stacked services (FCR + aFRR + arbitrage) — conflicting SOC demands
+- Sub-hourly price volatility — MPC can exploit, EMS can't see
+- Plant-model mismatch — MPC corrects via feedback, open-loop can't
+
+Most impactful change is likely economic MPC formulation + shorter battery duration.
+
+---
+
 ## v1_baseline — Four-Stage Gate
 
 ### Stage 1: Validation — PASS
