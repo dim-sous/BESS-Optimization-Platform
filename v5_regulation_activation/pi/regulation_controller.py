@@ -85,9 +85,9 @@ class RegulationController:
         # SOC safety clamping
         P_reg_demand = self._soc_clamp(P_reg_demand, soc_current)
 
-        # SOC recovery bias: nudge SOC toward target during idle periods
+        # SOC recovery bias: nudge SOC toward target when idle (no activation)
         rp = self._rp
-        if abs(activation_signal) < rp.recovery_deadband:
+        if abs(activation_signal) < 1e-6:
             soc_target = bp.SOC_terminal
             P_recovery = rp.recovery_gain * (soc_target - soc_current) * P_max
             # P_recovery > 0 when SOC < target → want to charge → negative P_reg_demand

@@ -228,9 +228,7 @@ class EconomicEMS:
             opti.subject_to(opti.bounded(thp.T_min, TEMP[s], thp.T_max))
             opti.subject_to(opti.bounded(0.0, P_chg[s], bp.P_max_kw))
             opti.subject_to(opti.bounded(0.0, P_dis[s], bp.P_max_kw))
-            opti.subject_to(
-                opti.bounded(0.0, P_reg[s], bp.P_max_kw * ep.regulation_fraction)
-            )
+            opti.subject_to(opti.bounded(0.0, P_reg[s], bp.P_max_kw))
 
             # Power budget: charge + reg <= P_max,  discharge + reg <= P_max
             for k in range(N):

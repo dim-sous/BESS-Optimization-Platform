@@ -95,8 +95,10 @@ def rule_based_dispatch(
 ) -> dict:
     """Generate rule-based charge/discharge schedule from price sorting.
 
-    Charges during the cheapest 8 hours, discharges during the most
-    expensive 8 hours.  No regulation commitment.
+    Charges during the cheapest hours, discharges during the most
+    expensive hours.  Number of hours sized to the battery's usable
+    energy capacity so the schedule is physically feasible.
+    No regulation commitment.
     """
     prices = energy_prices[:n_hours]
     order = np.argsort(prices)
@@ -104,11 +106,19 @@ def rule_based_dispatch(
     p_chg = np.zeros(n_hours)
     p_dis = np.zeros(n_hours)
 
-    n_charge = min(8, n_hours // 3)
-    n_discharge = min(8, n_hours // 3)
+    # Size the schedule to what the battery can actually deliver
+    usable_kwh = (bp.SOC_max - bp.SOC_min) * bp.E_nom_kwh
+    power = bp.P_max_kw * 0.8
+    n_hours_needed = int(np.ceil(usable_kwh / power))
+    n_charge = min(n_hours_needed, n_hours // 3)
+    n_discharge = min(n_hours_needed, n_hours // 3)
 
-    p_chg[order[:n_charge]] = bp.P_max_kw * 0.8
-    p_dis[order[-n_discharge:]] = bp.P_max_kw * 0.8
+    # Only schedule if discharge price > charge price (profitable spread)
+    charge_hours = order[:n_charge]
+    discharge_hours = order[-n_discharge:]
+    if prices[discharge_hours[-1]] > prices[charge_hours[-1]]:
+        p_chg[charge_hours] = power
+        p_dis[discharge_hours] = power
 
     soc_ref = np.full(n_hours + 1, bp.SOC_init)
     soh_ref = np.full(n_hours + 1, bp.SOH_init)
@@ -483,26 +493,6 @@ class MultiRateSimulator:
                     if has_cells:
                         balancing_power_log[:, mpc_idx] = self.plant.get_balancing_power()
 
-                    # Energy profit accounting (at MPC resolution)
-                    ems_hour_now = sim_step // steps_per_ems
-                    if ems_hour_now < energy_scenarios.shape[1]:
-                        price_e = float(energy_scenarios[0, ems_hour_now])
-                    else:
-                        price_e = float(energy_scenarios[0, -1])
-
-                    dt_h = tp.dt_mpc / 3600.0
-                    e_profit = price_e * (u_mpc[1] - u_mpc[0]) * dt_h
-                    d_cost = (
-                        ep.degradation_cost
-                        * bp.alpha_deg
-                        * (u_mpc[0] + u_mpc[1] + u_mpc[2])
-                        * tp.dt_mpc
-                    )
-                    cum_energy_profit += e_profit
-                    cum_deg_cost += d_cost
-                    energy_profit_arr[mpc_idx] = e_profit
-                    deg_cost_arr[mpc_idx] = d_cost
-
                 mpc_ref_base += 1
                 mpc_idx += 1
 
@@ -573,6 +563,39 @@ class MultiRateSimulator:
 
             power_applied[sim_step] = u_actual
             power_delivered_log[sim_step] = P_delivered
+
+            # Energy profit and degradation accounting (every PI step).
+            # Use actual SOC change to derive real net power — the plant
+            # clips power when SOC hits limits, so commanded power can
+            # overstate what was actually delivered.
+            soc_before = soc_true[sim_step]
+            soc_after = soc_true[sim_step + 1]
+            delta_soc = soc_after - soc_before
+            # delta_soc < 0 → net discharge, delta_soc > 0 → net charge
+            # Convert to net power: P_net = -delta_soc * E_nom / dt_h
+            # Revenue = price * P_net_discharge = price * (-delta_soc) * E / dt
+            ems_hour_now = sim_step // steps_per_ems
+            if ems_hour_now < energy_scenarios.shape[1]:
+                price_e = float(energy_scenarios[0, ems_hour_now])
+            else:
+                price_e = float(energy_scenarios[0, -1])
+
+            dt_h_pi = tp.dt_pi / 3600.0
+            # Net discharge power in kW (positive = selling to grid)
+            P_net_kw = -delta_soc * bp.E_nom_kwh / dt_h_pi
+            e_profit_step = price_e * P_net_kw * dt_h_pi
+            # Degradation: use actual power (capped at what the plant accepted)
+            P_actual_total = abs(P_net_kw)
+            d_cost_step = (
+                ep.degradation_cost * bp.alpha_deg * P_actual_total * tp.dt_pi
+            )
+            cum_energy_profit += e_profit_step
+            cum_deg_cost += d_cost_step
+
+            cur_mpc_idx = sim_step // steps_per_mpc
+            if cur_mpc_idx < N_mpc_steps:
+                energy_profit_arr[cur_mpc_idx] += e_profit_step
+                deg_cost_arr[cur_mpc_idx] += d_cost_step
 
             # Log cell-level states
             if has_cells:

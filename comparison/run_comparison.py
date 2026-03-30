@@ -697,7 +697,7 @@ def main() -> None:
                          bp, tp, ep, mp, ekf_p, thp, elp, pp))
 
     # ---- Run ----
-    n_workers = min(len(jobs), multiprocessing.cpu_count(), 2)
+    n_workers = min(len(jobs), multiprocessing.cpu_count(), 1)
     print(f"  Running {len(jobs)} jobs ({n_days} days x {N_MC} MC x "
           f"{len(STRAT_NAMES)} strategies) across {n_workers} workers...\n")
     t0 = time.perf_counter()

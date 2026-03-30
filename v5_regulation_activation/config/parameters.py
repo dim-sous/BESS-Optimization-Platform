@@ -203,10 +203,9 @@ class EMSParams:
     N_ems: int = 24                    # Planning horizon  [hours / steps at dt_ems]
     Nc_ems: int = 24                   # Control horizon  (= N_ems)
     n_scenarios: int = 5               # Number of price scenarios
-    regulation_fraction: float = 0.3   # Max fraction of P_max for regulation  [-]
     degradation_cost: float = 50.0     # Cost of SOH loss  [$/unit SOH lost]
     endurance_hours: float = 0.5        # Required sustained full-activation endurance  [hours]  [v5]
-    expected_activation_frac: float = 0.29  # E[|activation|] from Markov chain stationary dist  [-]  [v5]
+    expected_activation_frac: float = 0.04  # E[|activation|] from OU frequency model  [-]  [v5]
     terminal_soc_weight: float = 1e4   # Terminal SOC deviation penalty
     terminal_soh_weight: float = 1e4   # Terminal SOH deviation penalty
 
