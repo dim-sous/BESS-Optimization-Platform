@@ -633,7 +633,7 @@ Plotly.newPlot('spark-wear',[
     # --save-timeseries and update these arrays.
     lines.append("""\
 // Single-day time series from a representative Q1 2024 simulation.
-// To regenerate for a specific day, run: uv run python v5_regulation_activation/main.py --day N --save-timeseries
+// To regenerate for a specific day, run: uv run python comparison/run_v5_comparison.py --days N
 const t_day=[0,0.5,1,1.5,2,2.5,3,3.5,4,4.5,5,5.5,6,6.5,7,7.5,8,8.5,9,9.5,10,10.5,11,11.5,12,12.5,13,13.5,14,14.5,15,15.5,16,16.5,17,17.5,18,18.5,19,19.5,20,20.5,21,21.5,22,22.5,23,23.5];
 const soc_day=[50.4,50.4,50.3,50.1,48.9,48.4,49.6,51.3,55.7,57.3,60.8,71.7,81.9,86.2,88.9,88.8,85.8,76.9,66.3,62.2,60,58.3,58.6,58.7,58.6,59.3,62.7,65.5,67.3,72.7,80.5,81.8,79.9,77.7,72.2,69.8,58.1,37.6,20.6,14.4,11.1,10.3,10,10,10,10,10,10.1];
 const pwr_day=[0,0.2,0.2,2.6,5.3,-2.8,-6.5,-11.4,-23.2,-8.7,-34,-48.8,-25.6,-13.2,-5.6,6.8,24.2,39.7,28.9,5.7,11.3,-0.1,-0.9,0.1,0,-8.5,-18.3,-7.7,0,-35.6,-17.3,4,8.3,12.6,0,31.3,69.7,73.3,35.8,14.1,6.2,0.9,0.2,-0.1,0,0,0,-1.2];

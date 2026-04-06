@@ -1,92 +1,82 @@
 ## Current State
-- Completed and frozen: v1, v2, v3, v4 (4-stage gate passed — do not modify)
-- In development: v5
-- Gate reports: see backlog.md
+- **Frozen versions:** v1, v2, v3, v4 live in [archive/](archive/) and **must not be modified**.
+- **Active development:** v5 (Regulation Activation & MPC Necessity) — refactored into modular `core/` (shared platform) + `strategies/` (one folder per strategy) layout. Linear simulator core; bugs A/B/C from the audit eliminated by construction.
+- **Active issues:** see [backlog.md](backlog.md) (item 0 lists the open audit findings the refactor is addressing).
+- **Historical gate reports:** [archive/gate_reports.md](archive/gate_reports.md).
 
-## If context is unclear Re-read this file top to bottom. Ask me to confirm the current version.
+## If context is unclear
+Re-read this file top to bottom. Ask the user to confirm the current state.
 
 You are assisting in the development of an industry-grade battery digital twin, control, and optimization platform in Python.
-Version 1 (baseline) is already implemented. All further development follows an incremental engineering process toward a robust, production-grade system.
+
 ────────────────────────────────────────
 BEHAVIORAL PRINCIPLES
 ────────────────────────────────────────
-1. PROPOSE BEFORE IMPLEMENTING
-Before writing any code for a new upgrade, output a short proposal:
-What does this upgrade add and why does it matter?
-What are the expected benefits and risks?
-Any dependencies on prior upgrades or known implementation pitfalls?
-For non-trivial changes, wait for confirmation. If you see a better approach or a meaningful tradeoff, surface it first.
-2. ONE UPGRADE AT A TIME
-Each upgrade creates a new versioned folder. Never merge multiple upgrades into a single step. Each version must be independently runnable and its changes reversible.
-3. FOUR-STAGE GATE — mandatory before moving to the next upgrade
-A. Validation — confirm the implementation is physically and mathematically consistent
-B. Evaluation — compute and log the standard metrics (see below)
-C. Comparison — generate plots comparing this version to the previous one and to v1
-D. Stress Test - Test the implementation under extreme conditions
-4. PRODUCTION-GRADE CODE
-Use modular architecture, type hints, docstrings, configuration files, logging, and exception handling throughout. Use explicit physical units everywhere. Prefer clarity and maintainability over cleverness.
-5. AVOID OVER-ENGINEERING
-Prefer the smallest implementation that meaningfully advances the system. If a proposed approach significantly increases complexity or compute time, explain the tradeoff and suggest a lighter alternative.
-6. COMPUTATIONAL AWARENESS
-For each upgrade, note the effect on simulation and solver time. Ensure the system remains tractable. Flag any upgrade that risks making real-time operation infeasible.
-7. PLAN BEFORE IMPLEMENTING
-For any non-trivial change (NLP reformulation, architecture change, new feature), enter plan mode first. Use EnterPlanMode to explore the codebase, design the approach, and get user approval before writing code. Never silently start implementing.
+1. **PROPOSE BEFORE IMPLEMENTING.** Before writing any code for a new upgrade, output a short proposal (what / why / risks / dependencies). For non-trivial changes, wait for confirmation. If you see a better approach or a meaningful tradeoff, surface it first.
+2. **ONE UPGRADE AT A TIME.** Each upgrade is a self-contained step. Never bundle multiple upgrades. Each step must be independently runnable and reversible.
+3. **FOUR-STAGE GATE — mandatory before moving to the next upgrade:**
+   A. Validation — confirm the implementation is physically and mathematically consistent
+   B. Evaluation — compute and log the standard metrics (see below)
+   C. Comparison — generate plots comparing this version to the previous one
+   D. Stress Test — test the implementation under extreme conditions
+4. **PRODUCTION-GRADE CODE.** Modular architecture, type hints, docstrings, configuration files, logging, exception handling. Explicit physical units everywhere. Clarity over cleverness.
+5. **AVOID OVER-ENGINEERING.** Smallest implementation that meaningfully advances the system. Flag complexity/compute tradeoffs and suggest lighter alternatives.
+6. **COMPUTATIONAL AWARENESS.** For each upgrade, note the effect on simulation and solver time. Flag anything that risks making real-time operation infeasible.
+7. **PLAN BEFORE IMPLEMENTING.** For any non-trivial change (NLP reformulation, architecture change, new feature), enter plan mode first. Use `EnterPlanMode` to explore the codebase, design the approach, and get user approval before writing code. Never silently start implementing.
+8. **STICK WITH REALISM.** Model mismatch is real and the controllers must plan around it. Don't paper over physical inconsistencies — surface them and decide explicitly.
+
 ────────────────────────────────────────
-VERSIONING STRUCTURE
+REPOSITORY LAYOUT (post-refactor)
 ────────────────────────────────────────
-battery_optimization_platform/
-├── v1_baseline/
-├── v2_thermal_model/
-├── v3_pack_model/
-├── v4_electrical_rc_model/
-├── v5_regulation_activation/
-├── v6_ukf_estimator/
-├── v7_parameter_estimation/
-├── v8_acados_nmpc/
-├── v9_degradation_aware_mpc/
-├── v10_disturbance_forecast_uncertainty/
-├── v11_measurement_delay/
-├── v12_multi_battery_system/
-├── v13_grid_inverter_model/
-├── v14_market_bidding/
-└── results/version_comparison.csv
+```
+bess/
+├── README.md
+├── CLAUDE.md                  ← this file
+├── backlog.md                 ← active issues + future work
+├── pyproject.toml
+├── archive/                   ← v1–v4 frozen, gate_reports.md
+├── core/                      ← shared platform modules
+│   ├── config/                ←   parameter dataclasses
+│   ├── physics/               ←   plant, ODE, OCV
+│   ├── markets/               ←   prices, activation, revenue
+│   ├── estimators/            ←   EKF, MHE
+│   ├── planners/              ←   rule_based, deterministic_lp, stochastic_ems
+│   ├── mpc/                   ←   tracking, economic
+│   ├── pi/                    ←   regulation controller
+│   ├── accounting/            ←   pure-function ledger
+│   ├── simulator/             ←   strategy spec, traces, linear core loop
+│   └── visualization/
+├── strategies/                ← one folder per strategy (recipe + README)
+│   ├── rule_based/
+│   ├── deterministic_lp/
+│   ├── ems_clamps/            ← sanity-check only, not in pitch deck
+│   ├── ems_pi/                ← sanity-check only, not in pitch deck
+│   ├── tracking_mpc/          ← sanity-check only, not in pitch deck
+│   └── economic_mpc/          ← production v5 strategy
+├── comparison/                ← strategy comparison harness
+├── presentation/              ← B2B pitch deck generator
+└── results/
+```
+
 ────────────────────────────────────────
 STANDARD METRICS — compute and store after every version
 ────────────────────────────────────────
-Control: RMSE_SOC_tracking, RMSE_power_tracking
-Estimation: RMSE_SOC_estimation, RMSE_SOH_estimation
-Economic: total_profit, total_degradation_cost
-Computational: avg_mpc_solve_time, max_mpc_solve_time, estimator_solve_time
-Store in results/version_comparison.csv. Generate comparison plots for: SOC, SOH, temperature, voltage, power, profit, solver time.
+- Control: RMSE_SOC_tracking, RMSE_power_tracking
+- Estimation: RMSE_SOC_estimation, RMSE_SOH_estimation
+- Economic: total_profit, total_degradation_cost
+- Computational: avg_mpc_solve_time, max_mpc_solve_time, estimator_solve_time
+- Generate comparison plots for: SOC, SOH, temperature, voltage, power, profit, solver time.
+
 ────────────────────────────────────────
 UPGRADE BACKLOG
 ────────────────────────────────────────
-Completed upgrades (frozen — see backlog.md for gate reports):
-v2 — Thermal Model ✓
-v3 — Multi-Cell Pack Model ✓
-v4 — 2RC Electrical Model ✓
+Frozen (in archive/): v1 baseline · v2 thermal · v3 multi-cell pack · v4 2RC electrical
+Active: v5 Regulation Activation & MPC Necessity
+Future: v6 UKF · v7 joint state/param estimation · v8 ACADOS NMPC · v9 degradation-aware MPC · v10 stochastic forecast uncertainty · v11 delays · v12 multi-battery · v13 grid inverter · v14 market bidding
 
-In development:
-v5 — Regulation Activation & MPC Necessity (Medium / Extremely High)
-Add real-time regulation delivery: grid sends stochastic activation signals (±P_reg) that must be followed at sub-minute timescale. EMS plans capacity commitment (hourly), but MPC must execute actual delivery while maintaining SOC/thermal/voltage constraints. Without MPC, open-loop EMS-only dispatch cannot react to activation signals → SOC constraint violations, regulation delivery failures, penalties. With MPC, closed-loop feedback ensures smooth delivery, constraint satisfaction, and higher net profit. Formal comparison: EMS-only vs EMS+MPC under activation disturbances. This version demonstrates that MPC is indispensable for real-time grid service delivery, not merely a tracking layer.
-v6 — Unscented Kalman Filter (Medium / Very High)
-Replace EKF with UKF. Implement sigma points, unscented transform, prediction, correction, covariance update. Compare UKF vs EKF estimation accuracy.
-v7 — Joint State and Parameter Estimation (Medium / Very High)
-Estimate R_internal, capacity, and efficiency online. Augment state: x_aug = [x, R_int, Capacity]. Implement via MHE.
-v8 — ACADOS NMPC (High / Extremely High)
-Replace CasADi/IPOPT MPC with ACADOS. Implement multiple shooting, Real-Time Iteration (RTI), control blocking. Measure and compare solve time and control performance.
-v9 — Degradation-Aware MPC (High / Extremely High)
-Add SOH to MPC state. Add degradation cost to objective. Enforce SOH ≥ SOH_min constraint. Characterize profit vs degradation tradeoff.
-v10 — Disturbance Forecast Uncertainty (High / High)
-Add stochastic price forecasts. Implement scenario-based MPC (web search Alberto Bemporad for inspiration on stochastic MPC). Compare profit and robustness against v9. Replace ad-hoc historical resampling in scenario generation with a proper method: quantile regression on price residuals, copula-based generation for energy/regulation price correlation, and scenario reduction via Wasserstein distance (Growe-Kuska et al.).
-v11 — Measurement and Communication Delays (High / High)
-Add measurement delay, actuator delay, random latency. Update estimator and MPC to compensate.
-v12 — Multi-Battery System (Very High / High)
-Simulate multiple batteries, each with local MPC, coordinated by a central EMS.
-v13 — Grid-Connected Inverter Model (Very High / High)
-Add inverter dynamics: states id, iq, Vdc. Implement power converter model, power limits, reactive power control.
-v14 — Market Bidding Optimization (Very High / Medium)
-Add day-ahead bidding, reserve bidding, and market participation optimization.
+The v5 refactor (`core/` + `strategies/` modularization) takes precedence over v6 work — the audit found execution-layer bugs that must be fixed by construction, not patched, before adding more capabilities.
+
 ────────────────────────────────────────
-The goal is a well-tested, physically realistic, and maintainable platform that improves measurably at each step — not one that is maximally complex.
+GOAL
 ────────────────────────────────────────
+A well-tested, physically realistic, maintainable platform that improves measurably at each step — not one that is maximally complex.

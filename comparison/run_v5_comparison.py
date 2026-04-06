@@ -1,24 +1,28 @@
-"""84-day strategy comparison for v5_regulation_activation on real German data.
+"""Strategy comparison for v5 on real German market data.
 
-Runs four control strategies through v5's MultiRateSimulator on real
-EPEX SPOT day-ahead + SMARD FCR prices (Q1 2024, 84 days):
+Runs the six configured strategies through the linear simulator core
+on real EPEX SPOT day-ahead + SMARD FCR prices (Q1 2024).
 
-  1. Rule-Based      — price-sorted schedule, no regulation
-  2. EMS + Clamps    — EMS + open-loop hard SOC clamps (industry standard)
-  3. EMS + PI        — EMS + advanced PI controller, no MPC
-  4. Full Optimizer  — EMS + MPC + PI (complete hierarchy)
+Pitch-visible (B2B):
+  1. rule_based       — naive price-sorted dispatch, no FCR
+  2. deterministic_lp — commercial-baseline rolling-horizon LP
+  3. economic_mpc     — v5 product (stochastic EMS + economic MPC + PI)
+
+Internal sanity checks (NOT in pitch deck):
+  4. ems_clamps       — stochastic EMS + open-loop dispatch
+  5. ems_pi           — stochastic EMS + PI (no MPC)
+  6. tracking_mpc     — stochastic EMS + tracking MPC + PI (old v5 stack)
 
 All strategies share identical conditions per day: same realized prices,
-same forecast scenarios (realized day excluded), same activation signal
-(fixed seed per strategy instance).
+same forecast scenarios (realized day held out), same activation seed.
 
-Saves structured results to results/v5_comparison.json for the
-presentation generator.
+Saves structured results to results/v5_comparison.json.
 
 Usage:
-    uv run python comparison/run_v5_comparison.py          # 1 day (quick check)
-    uv run python comparison/run_v5_comparison.py --full    # 84 days
-    uv run python comparison/run_v5_comparison.py -n 10     # custom day count
+    uv run python comparison/run_v5_comparison.py            # 1 day (quick)
+    uv run python comparison/run_v5_comparison.py --full     # 84 days
+    uv run python comparison/run_v5_comparison.py -n 10      # custom day count
+    uv run python comparison/run_v5_comparison.py --days 0,3,41
 """
 
 from __future__ import annotations
@@ -36,11 +40,10 @@ from datetime import datetime, timezone
 import numpy as np
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-V5_ROOT = REPO_ROOT / "v5_regulation_activation"
-if str(V5_ROOT) not in sys.path:
-    sys.path.insert(0, str(V5_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from config.parameters import (  # noqa: E402
+from core.config.parameters import (  # noqa: E402
     BatteryParams,
     EKFParams,
     ElectricalParams,
@@ -50,12 +53,19 @@ from config.parameters import (  # noqa: E402
     PackParams,
     RegControllerParams,
     RegulationParams,
-    Strategy,
     ThermalParams,
     TimeParams,
 )
-from data.real_price_loader import RealPriceLoader  # noqa: E402
-from simulation.simulator import MultiRateSimulator  # noqa: E402
+from core.markets.price_loader import RealPriceLoader  # noqa: E402
+from core.simulator.core import run_simulation  # noqa: E402
+
+# Strategy recipes — each module exposes `make_strategy(**params) -> Strategy`
+from strategies.deterministic_lp.strategy import make_strategy as _ms_lp  # noqa: E402
+from strategies.economic_mpc.strategy import make_strategy as _ms_econ  # noqa: E402
+from strategies.ems_clamps.strategy import make_strategy as _ms_clamps  # noqa: E402
+from strategies.ems_pi.strategy import make_strategy as _ms_pi  # noqa: E402
+from strategies.rule_based.strategy import make_strategy as _ms_rb  # noqa: E402
+from strategies.tracking_mpc.strategy import make_strategy as _ms_track  # noqa: E402
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -65,25 +75,33 @@ logging.basicConfig(
 )
 
 # Data paths (real prices live in v4's data directory)
-ENERGY_CSV = REPO_ROOT / "v4_electrical_rc_model" / "data" / "real_prices" / "de_day_ahead_2024_q1.csv"
-REG_CSV = REPO_ROOT / "v4_electrical_rc_model" / "data" / "real_prices" / "de_fcr_regulation_2024_q1.csv"
+ENERGY_CSV = REPO_ROOT / "archive" / "v4_electrical_rc_model" / "data" / "real_prices" / "de_day_ahead_2024_q1.csv"
+REG_CSV = REPO_ROOT / "archive" / "v4_electrical_rc_model" / "data" / "real_prices" / "de_fcr_regulation_2024_q1.csv"
 RESULTS_DIR = REPO_ROOT / "results"
 
-# Strategy order: simplest to most complex
-STRATEGY_ORDER = [
-    Strategy.RULE_BASED,
-    Strategy.EMS_CLAMPS,
-    Strategy.EMS_PI,
-    Strategy.FULL,
+# Strategy registry. The order is also the print/plot order.
+# Pitch deck renders only the "pitch_visible" subset.
+STRATEGY_FACTORIES = [
+    ("rule_based",       _ms_rb),
+    ("ems_clamps",       _ms_clamps),
+    ("ems_pi",           _ms_pi),
+    ("deterministic_lp", _ms_lp),
+    ("tracking_mpc",     _ms_track),
+    ("economic_mpc",     _ms_econ),
 ]
-STRAT_NAMES = [s.value for s in STRATEGY_ORDER]
+STRAT_NAMES = [name for name, _ in STRATEGY_FACTORIES]
 
 STRATEGY_LABELS = {
-    "rule_based": "Rule-Based",
-    "ems_clamps": "Industry Standard",
-    "ems_pi": "Advanced PI",
-    "full": "Full Optimizer",
+    "rule_based":       "Rule-Based",
+    "ems_clamps":       "Stochastic EMS (sanity)",
+    "ems_pi":           "EMS + PI (sanity)",
+    "deterministic_lp": "Commercial Baseline",
+    "tracking_mpc":     "Tracking MPC (sanity)",
+    "economic_mpc":     "Economic MPC (v5)",
 }
+
+# Strategies shown in the B2B pitch deck.
+PITCH_VISIBLE = {"rule_based", "deterministic_lp", "economic_mpc"}
 
 
 # =========================================================================
@@ -91,28 +109,39 @@ STRATEGY_LABELS = {
 # =========================================================================
 
 def _run_single_day(args: tuple) -> dict:
-    """Run all 4 strategies for one day. Designed for Pool.map."""
-    (day_idx, energy_scenarios, reg_scenarios, probabilities,
+    """Run all configured strategies for one day. Designed for Pool.map."""
+    (day_idx, forecast_e, forecast_r, probabilities,
+     realized_e_prices, realized_r_prices,
      bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
      reg_ctrl_p, reg_p, pp) = args
 
     logging.disable(logging.WARNING)
 
+    params = dict(
+        bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p, mhe_p=mhe_p,
+        thp=thp, elp=elp, reg_ctrl_p=reg_ctrl_p, reg_p=reg_p, pp=pp,
+    )
+
     day_result = {"day_idx": day_idx}
 
-    for strategy in STRATEGY_ORDER:
+    for name, factory in STRATEGY_FACTORIES:
         t0 = time.perf_counter()
+        strategy = factory(**params)
 
-        simulator = MultiRateSimulator(
-            bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
-            reg_ctrl_p, reg_p, strategy, pp, run_mhe=False,
+        results = run_simulation(
+            strategy=strategy,
+            forecast_e=forecast_e,
+            forecast_r=forecast_r,
+            probabilities=probabilities,
+            realized_e_prices=realized_e_prices,
+            realized_r_prices=realized_r_prices,
+            **params,
         )
-        results = simulator.run(energy_scenarios, reg_scenarios, probabilities)
-        del simulator
+        del strategy
         gc.collect()
 
         mpc_t = results.get("mpc_solve_times", np.array([]))
-        day_result[strategy.value] = {
+        day_result[name] = {
             "total_profit": float(results["total_profit"]),
             "energy_profit": float(results["energy_profit_total"]),
             "capacity_revenue": float(results["capacity_revenue"]),
@@ -227,23 +256,34 @@ def print_results(agg: dict[str, dict], n_days: int) -> None:
     _row("MPC failures (total)",
          [int(np.sum(agg[s]["mpc_failures"])) for s in STRAT_NAMES])
 
-    # Advantage
-    opt = np.array(agg["full"]["profits"])
-    rb = np.array(agg["rule_based"]["profits"])
-    ind = np.array(agg["ems_clamps"]["profits"])
-    print(f"\n  Full Optimizer vs Rule-Based:")
-    adv_rb = opt - rb
-    print(f"    Advantage:  ${adv_rb.mean():.2f}/day  "
-          f"({(adv_rb > 0).mean() * 100:.0f}% win rate)")
-    print(f"    Annual (200 kWh): ${adv_rb.mean() * 365:.0f}")
-    print(f"    Annual (10 MWh):  ${adv_rb.mean() * 365 * 50:,.0f}")
-    print(f"    Annual (50 MWh):  ${adv_rb.mean() * 365 * 250:,.0f}")
+    # ---- Pitch comparison: economic_mpc vs rule_based and deterministic_lp ----
+    if "economic_mpc" in agg and "deterministic_lp" in agg:
+        econ = np.array(agg["economic_mpc"]["profits"])
+        rb = np.array(agg["rule_based"]["profits"])
+        lp = np.array(agg["deterministic_lp"]["profits"])
 
-    print(f"\n  Full Optimizer vs Industry Standard:")
-    adv_ind = opt - ind
-    print(f"    Advantage:  ${adv_ind.mean():.2f}/day  "
-          f"({(adv_ind > 0).mean() * 100:.0f}% win rate)")
-    print(f"    Annual (50 MWh):  ${adv_ind.mean() * 365 * 250:,.0f}")
+        print(f"\n  [PITCH] Economic MPC vs Rule-Based:")
+        adv = econ - rb
+        print(f"    Advantage:  ${adv.mean():.2f}/day  "
+              f"({(adv > 0).mean() * 100:.0f}% win rate)")
+        print(f"    Annual (200 kWh): ${adv.mean() * 365:.0f}")
+        print(f"    Annual (50 MWh):  ${adv.mean() * 365 * 250:,.0f}")
+
+        print(f"\n  [PITCH] Economic MPC vs Commercial Baseline (LP):")
+        adv = econ - lp
+        pct = adv.mean() / max(abs(lp.mean()), 1e-6) * 100
+        print(f"    Advantage:  ${adv.mean():.2f}/day "
+              f"({pct:+.1f}% vs LP, {(adv > 0).mean() * 100:.0f}% win rate)")
+        print(f"    Annual (50 MWh):  ${adv.mean() * 365 * 250:,.0f}")
+
+    # ---- Sanity comparison: economic vs tracking MPC ----
+    if "tracking_mpc" in agg and "economic_mpc" in agg:
+        econ = np.array(agg["economic_mpc"]["profits"])
+        trk = np.array(agg["tracking_mpc"]["profits"])
+        print(f"\n  [SANITY] Economic MPC vs Tracking MPC:")
+        adv = econ - trk
+        print(f"    Advantage:  ${adv.mean():.2f}/day  "
+              f"({(adv > 0).mean() * 100:.0f}% win rate)")
 
     # Wall time
     print(f"\n  Wall Time (mean s/day):")
@@ -260,15 +300,24 @@ def main() -> None:
     """Run strategy comparison on real German market data."""
     parser = argparse.ArgumentParser(description="v5 strategy comparison")
     parser.add_argument("--full", action="store_true", help="Run all 84 days")
-    parser.add_argument("-n", type=int, default=None, help="Number of days")
+    parser.add_argument("-n", type=int, default=None, help="Number of contiguous days from day 0")
+    parser.add_argument(
+        "--days", type=str, default=None,
+        help="Comma-separated specific day indices (e.g. '3,41,86'). Overrides -n/--full.",
+    )
     args = parser.parse_args()
 
-    if args.n is not None:
-        N_DAYS = args.n
-    elif args.full:
-        N_DAYS = 84
+    if args.days is not None:
+        DAY_INDICES = [int(d) for d in args.days.split(",")]
+        N_DAYS = len(DAY_INDICES)
     else:
-        N_DAYS = 1
+        DAY_INDICES = None
+        if args.n is not None:
+            N_DAYS = args.n
+        elif args.full:
+            N_DAYS = 84
+        else:
+            N_DAYS = 1
 
     N_FORECAST = 5     # Forecast scenarios per day (realized excluded)
 
@@ -287,7 +336,9 @@ def main() -> None:
 
     # Load real prices
     loader = RealPriceLoader(ENERGY_CSV, reg_csv=REG_CSV, seed=42)
-    n_days = min(N_DAYS, loader.n_days)
+    if DAY_INDICES is None:
+        DAY_INDICES = list(range(min(N_DAYS, loader.n_days)))
+    n_days = len(DAY_INDICES)
     n_hours_total = int(tp.sim_hours) + ep.N_ems
 
     stats = loader.price_stats
@@ -297,30 +348,34 @@ def main() -> None:
     print(f"  Data:       EPEX SPOT DE-LU + SMARD FCR, Q1 2024 ({stats['n_days']} days)")
     print(f"  Battery:    {bp.E_nom_kwh:.0f} kWh / {bp.P_max_kw:.0f} kW")
     print(f"  Days:       {n_days}")
-    print(f"  Forecasts:  {N_FORECAST} other days per run (realized NOT in set)")
-    print(f"  Strategies: {', '.join(STRATEGY_LABELS[s.value] for s in STRATEGY_ORDER)}")
-    print(f"  Total sims: {n_days * len(STRATEGY_ORDER)}")
+    print(f"  Forecasts:  {N_FORECAST} other days per run "
+          f"(realized day held out — fixed v5 info-leak)")
+    print(f"  Strategies: {', '.join(STRATEGY_LABELS[name] for name, _ in STRATEGY_FACTORIES)}")
+    print(f"  Total sims: {n_days * len(STRATEGY_FACTORIES)}")
     print("=" * 78)
     print()
 
-    # Build jobs: one per day
+    # Build jobs: one per requested day
     jobs = []
-    for day_idx in range(n_days):
-        energy_scen, reg_scen, probs = loader.generate_scenarios_for_day(
-            day_idx, n_hours=n_hours_total, n_scenarios=N_FORECAST,
+    for day_idx in DAY_INDICES:
+        forecast_e, forecast_r, probs, realized_e, realized_r = (
+            loader.generate_scenarios_for_day(
+                day_idx, n_hours=n_hours_total, n_scenarios=N_FORECAST,
+            )
         )
         jobs.append((
-            day_idx, energy_scen, reg_scen, probs,
+            day_idx, forecast_e, forecast_r, probs,
+            realized_e, realized_r,
             bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
             reg_ctrl_p, reg_p, pp,
         ))
 
     # Run with multiprocessing
     n_workers = min(len(jobs), max(1, multiprocessing.cpu_count() - 1), 2)
-    print(f"  Running {len(jobs)} days x {len(STRATEGY_ORDER)} strategies "
+    print(f"  Running {len(jobs)} days x {len(STRATEGY_FACTORIES)} strategies "
           f"across {n_workers} workers...")
     print(f"  Estimated runtime: ~{n_days * 6 / n_workers / 60:.0f} hours "
-          f"(FULL strategy dominates at ~5 min/day)\n")
+          f"(MPC strategies dominate at ~3 min/day with JIT)\n")
     t0 = time.perf_counter()
 
     all_days: list[dict] = []
@@ -332,13 +387,14 @@ def main() -> None:
             elapsed = time.perf_counter() - t0
             eta = elapsed / i * (len(jobs) - i)
             day_idx = result["day_idx"]
-            full_profit = result["full"]["total_profit"]
-            full_score = result["full"]["delivery_score"]
+            headline_key = "economic_mpc" if "economic_mpc" in result else "tracking_mpc"
+            head_profit = result[headline_key]["total_profit"]
+            head_score = result[headline_key]["delivery_score"]
             print(
                 f"  [{i:3d}/{len(jobs)}] "
                 f"Day {day_idx:2d} done  "
-                f"profit=${full_profit:6.2f}  "
-                f"delivery={full_score*100:5.1f}%  "
+                f"{headline_key}: profit=${head_profit:6.2f}  "
+                f"delivery={head_score*100:5.1f}%  "
                 f"[{elapsed:.0f}s elapsed, ~{eta:.0f}s remaining]",
                 flush=True,
             )
@@ -389,7 +445,7 @@ def main() -> None:
 
     comparison = {
         "meta": {
-            "version": "v5_regulation_activation",
+            "version": "v5_core_refactor",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "data_source": "EPEX SPOT DE-LU + SMARD FCR, Q1 2024",
             "n_days": n_days,
@@ -404,6 +460,7 @@ def main() -> None:
             "SOC_min": bp.SOC_min,
             "SOC_max": bp.SOC_max,
             "strategy_labels": STRATEGY_LABELS,
+            "pitch_visible": sorted(PITCH_VISIBLE),
             "wall_time_total_s": round(wall, 1),
         },
         "strategies": mean_scalars,

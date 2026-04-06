@@ -43,12 +43,14 @@ Each version adds one major capability, passes a **4-stage gate** (validation, e
 ## Quick Start
 
 ```bash
-uv sync                                       # install dependencies
-uv run python v5_regulation_activation/main.py # run latest version (v5)
-uv run python v5_regulation_activation/stress_test.py  # 20 stress tests
+uv sync                                                  # install dependencies
+uv run python comparison/run_v5_comparison.py --days 3   # 1-day strategy comparison
+uv run python comparison/run_v5_comparison.py --full     # 84-day comparison
 ```
 
-Each version is independently runnable. Results go to `results/`.
+The active platform lives in `core/` (shared modules) and `strategies/` (one
+folder per strategy recipe). Frozen v1–v4 versions are in `archive/`. Results
+go to `results/`.
 
 ## Technical Stack
 
