@@ -7,6 +7,88 @@
 
 ---
 
+## Current state (2026-04-15)
+
+**HEAD:** `96af325` (cleanup commit). Working tree clean.
+
+**Restated pitch proposition** (user-approved):
+
+> `economic_mpc` (EMS + MPC) is strictly ≥ `ems_clamps` (EMS alone) on
+> every metric we care about — profit, delivery score, constraint
+> satisfaction, SOH preservation, robustness under disturbance — on the
+> honest RF1 baseline, at the current ledger calibration, without any
+> new architectural machinery. Activation tracking lives in the plant.
+> There is no strategy-layer PI.
+
+**Empirical baseline** (5-day RF1 validation, the canonical record at
+[results/v5_big_experiment.json](results/v5_big_experiment.json)):
+
+| Strategy | Calm | Volatile | Stressed |
+|---|---|---|---|
+| rule_based | 0.09 | 3.75 | 0.22 |
+| deterministic_lp | 18.61 | 31.12 | 19.79 |
+| **ems_clamps** | **18.68** | **31.39** | **20.29** |
+| tracking_mpc | 18.49 | 31.08 | 18.70 |
+| economic_mpc | 18.50 | 30.89 | 20.08 |
+
+`ems_clamps` wins everywhere. economic_mpc trails by $0.11–$0.49/day
+across all subsets. **The proposition is currently false** and the
+investigation question is "why."
+
+**Strategy ladder post-cleanup** (5 strategies, no PI, no `_no_pi`
+variants, no `ems_pi`):
+
+| # | Strategy | Role |
+|---|---|---|
+| 1 | `rule_based` | Naive baseline |
+| 2 | `deterministic_lp` | Commercial baseline (LP, mean-substitution) |
+| 3 | `ems_clamps` | Canonical "EMS alone" (stochastic two-stage program) |
+| 4 | `tracking_mpc` | Sanity control (known F2 bug, kept as broken baseline) |
+| 5 | `economic_mpc` | EMS + MPC. Production v5. The thing whose value is in question. |
+
+**Pending investigation:** day-3 volatile trace inspection. The biggest
+single-day MPC deficit was on day 3 of the volatile subset (~$1.50).
+Persisted traces are at [results/v5_big_traces/](results/v5_big_traces/).
+Walk the day hour by hour, find where economic_mpc loses money relative
+to ems_clamps, state the diagnosis precisely, then propose a targeted
+fix.
+
+**Earlier informal trace diff:** hours 0-7 are bit-identical between EMS
+and MPC (anchor dominates); divergence starts at hour 8 (peak morning
+discharge) where MPC consistently *under-commits at arbitrage extrema*
+(EMS +33.6 kW vs MPC +28.6 kW; EMS −10.4 vs MPC −5.3 at hour 12; etc).
+The pattern is consistent with both layers of the MPC audit's F3
+finding (anchor weight pulling MPC back) and Hypothesis B from the
+later audit (MPC does deterministic mean-substitution while EMS does
+two-stage stochastic). Anchor diagnostic showed loosening the anchor
+makes things *worse* (Case 3) — the anchor is protective against MPC's
+weaker formulation.
+
+**Explicitly deferred** (do not reopen until the investigation lands):
+- Concern I (degradation cost calibration is 3-4 OOM off)
+- D1-D5 architectural pitch upgrades (multi-market, day-ahead/RT split, etc)
+- WF1 design doc steps D-G — paused at [docs/wow_factor_1_design.md](docs/wow_factor_1_design.md), prep work in commit `af714d5` left in place
+- `penalty_mult` recalibration
+- Tracking MPC's F2 dead-variable bug
+- PI in any form
+
+**RF1 commits** (in order):
+- `3dd8b80` Step A — plant signature change, no behavior
+- `69ec1b1` Step B — activation flow inverted (plant owns it)
+- `4461d00` Step C — MPC `recent_activation` removed, `recovery_gain` retuned
+- `f4b5b01` Bug fix — two-pass `p_delivered` attribution in plant
+- `96af325` Cleanup — strategy-layer PI deleted, ems_pi deleted, no_pi variants deleted, −262 LOC
+
+**Files to read first when resuming:**
+1. This "current state" section
+2. The persisted traces in [results/v5_big_traces/](results/v5_big_traces/) for the day-3 investigation
+3. [core/mpc/economic.py](core/mpc/economic.py) — the MPC formulation
+4. [core/mpc/adapters.py](core/mpc/adapters.py) lines 144-148 — the mean-substitution that's the structural weakness
+5. [docs/wow_factor_1_design.md](docs/wow_factor_1_design.md) — the paused fix proposal
+6. [docs/realism_fix_1_design.md](docs/realism_fix_1_design.md) — the RF1 design (now landed)
+
+---
+
 ## Active issues
 
 ### 0. v5 simulator: hard audit findings (2026-04-06)
