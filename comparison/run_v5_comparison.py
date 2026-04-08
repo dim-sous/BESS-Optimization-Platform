@@ -51,7 +51,6 @@ from core.config.parameters import (  # noqa: E402
     MHEParams,
     MPCParams,
     PackParams,
-    RegControllerParams,
     RegulationParams,
     ThermalParams,
     TimeParams,
@@ -63,17 +62,8 @@ from core.simulator.core import run_simulation  # noqa: E402
 from strategies.deterministic_lp.strategy import make_strategy as _ms_lp  # noqa: E402
 from strategies.economic_mpc.strategy import make_strategy as _ms_econ  # noqa: E402
 from strategies.ems_clamps.strategy import make_strategy as _ms_clamps  # noqa: E402
-from strategies.ems_pi.strategy import make_strategy as _ms_pi  # noqa: E402
 from strategies.rule_based.strategy import make_strategy as _ms_rb  # noqa: E402
 from strategies.tracking_mpc.strategy import make_strategy as _ms_track  # noqa: E402
-
-
-def _ms_econ_no_pi(**kw):
-    return _ms_econ(pi_enabled=False, **kw)
-
-
-def _ms_track_no_pi(**kw):
-    return _ms_track(pi_enabled=False, **kw)
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -89,11 +79,16 @@ RESULTS_DIR = REPO_ROOT / "results"
 
 # Strategy registry. The order is also the print/plot order.
 # Pitch deck renders only the "pitch_visible" subset.
+#
+# 2026-04-15 cleanup: PI is gone (deleted as ceremonial post-RF1). The
+# `ems_pi` strategy is gone (was identical to `ems_clamps` post-RF1).
+# The `_no_pi` MPC variants are gone (PI doesn't exist any more, so
+# the counterfactual is meaningless). 5 strategies, one canonical
+# pitch comparison: economic_mpc vs ems_clamps.
 STRATEGY_FACTORIES = [
     ("rule_based",       _ms_rb),
-    ("ems_clamps",       _ms_clamps),
-    ("ems_pi",           _ms_pi),
     ("deterministic_lp", _ms_lp),
+    ("ems_clamps",       _ms_clamps),
     ("tracking_mpc",     _ms_track),
     ("economic_mpc",     _ms_econ),
 ]
@@ -101,42 +96,31 @@ STRAT_NAMES = [name for name, _ in STRATEGY_FACTORIES]
 
 STRATEGY_LABELS = {
     "rule_based":       "Rule-Based",
-    "ems_clamps":       "Stochastic EMS (sanity)",
-    "ems_pi":           "EMS + PI (sanity)",
-    "deterministic_lp": "Commercial Baseline",
+    "deterministic_lp": "Commercial Baseline (LP)",
+    "ems_clamps":       "Stochastic EMS (alone)",
     "tracking_mpc":     "Tracking MPC (sanity)",
     "economic_mpc":     "Economic MPC (v5)",
 }
 
 # Strategies shown in the B2B pitch deck.
-PITCH_VISIBLE = {"rule_based", "deterministic_lp", "economic_mpc"}
+PITCH_VISIBLE = {"rule_based", "deterministic_lp", "ems_clamps", "economic_mpc"}
 
-# Extended strategy registry used by the --big experiment.
-# The full ladder + PI on/off counterfactuals for the two MPC strategies.
-BIG_STRATEGY_FACTORIES = [
-    ("rule_based",          _ms_rb),
-    ("deterministic_lp",    _ms_lp),
-    ("ems_clamps",          _ms_clamps),
-    ("ems_pi",              _ms_pi),
-    ("tracking_mpc",        _ms_track),
-    ("tracking_mpc_no_pi",  _ms_track_no_pi),
-    ("economic_mpc",        _ms_econ),
-    ("economic_mpc_no_pi",  _ms_econ_no_pi),
-]
+# --big experiment uses the same registry post-cleanup (no _no_pi
+# variants exist any more, so there is no separate "extended" set).
+BIG_STRATEGY_FACTORIES = STRATEGY_FACTORIES
 BIG_STRATEGY_LABELS = {
-    "rule_based":          "Rule-Based",
-    "deterministic_lp":    "Det. LP",
-    "ems_clamps":          "EMS clamps",
-    "ems_pi":              "EMS+PI",
-    "tracking_mpc":        "Trk MPC+PI",
-    "tracking_mpc_no_pi":  "Trk MPC no-PI",
-    "economic_mpc":        "Econ MPC+PI",
-    "economic_mpc_no_pi":  "Econ MPC no-PI",
+    "rule_based":       "Rule-Based",
+    "deterministic_lp": "Det. LP",
+    "ems_clamps":       "EMS alone",
+    "tracking_mpc":     "Trk MPC",
+    "economic_mpc":     "Econ MPC",
 }
 
 # Strategies whose first-day-per-subset traces we persist for visualization.
+# The pitch comparison is economic_mpc vs ems_clamps; we keep LP traces too
+# for context against the commercial baseline.
 TRACE_PERSIST_STRATEGIES = {
-    "deterministic_lp", "ems_pi", "economic_mpc", "economic_mpc_no_pi",
+    "deterministic_lp", "ems_clamps", "economic_mpc",
 }
 
 
@@ -149,13 +133,13 @@ def _run_single_day(args: tuple) -> dict:
     (day_idx, forecast_e, forecast_r, probabilities,
      realized_e_prices, realized_r_prices,
      bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
-     reg_ctrl_p, reg_p, pp) = args
+     reg_p, pp) = args
 
     logging.disable(logging.WARNING)
 
     params = dict(
         bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p, mhe_p=mhe_p,
-        thp=thp, elp=elp, reg_ctrl_p=reg_ctrl_p, reg_p=reg_p, pp=pp,
+        thp=thp, elp=elp, reg_p=reg_p, pp=pp,
     )
 
     day_result = {"day_idx": day_idx}
@@ -266,7 +250,7 @@ def _run_big_job(args: tuple) -> dict:
        forecast_e, forecast_r, probabilities,
        realized_e, realized_r,
        bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
-       reg_ctrl_p, reg_p, pp,
+       reg_p, pp,
        trace_dir)
 
     `reg_p` is per-subset (carries the sigma_mhz_mult override).
@@ -277,13 +261,13 @@ def _run_big_job(args: tuple) -> dict:
      forecast_e, forecast_r, probabilities,
      realized_e, realized_r,
      bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
-     reg_ctrl_p, reg_p, pp, trace_dir) = args
+     reg_p, pp, trace_dir) = args
 
     logging.disable(logging.WARNING)
 
     params = dict(
         bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p, mhe_p=mhe_p,
-        thp=thp, elp=elp, reg_ctrl_p=reg_ctrl_p, reg_p=reg_p, pp=pp,
+        thp=thp, elp=elp, reg_p=reg_p, pp=pp,
     )
 
     day_result = {"subset_id": subset_id, "day_idx": day_idx}
@@ -461,27 +445,24 @@ def _print_big_summary(agg: dict, subsets: list[dict], strat_names: list[str]) -
             print(f"  {float(np.mean(vals)):14.2f}", end="")
         print()
 
-    # PI on/off views (the user-requested counterfactual).
-    print("\n  ── PI on/off counterfactuals (mean profit, $/day) ──")
-    print(f"    {'comparison':40s}", end="")
+    # Headline pitch comparison: economic_mpc vs ems_clamps (the
+    # canonical "is the MPC layer worth its compute" diff).
+    print("\n  ── Headline: economic_mpc − ems_clamps ($/day) ──")
+    print(f"    {'metric':40s}", end="")
     for sub in subsets:
         print(f"  {sub['id']:>14s}", end="")
     print()
     print("    " + "─" * 40 + ("  " + "─" * 14) * len(subsets))
-    for label, on_key, off_key in [
-        ("economic_mpc:  PI on  − PI off", "economic_mpc", "economic_mpc_no_pi"),
-        ("tracking_mpc:  PI on  − PI off", "tracking_mpc", "tracking_mpc_no_pi"),
-    ]:
-        print(f"    {label:40s}", end="")
-        for sub in subsets:
-            on = float(np.mean([d["total_profit"] for d in agg[sub["id"]][on_key]]))
-            off = float(np.mean([d["total_profit"] for d in agg[sub["id"]][off_key]]))
-            print(f"  {(on - off):+14.3f}", end="")
-        print()
+    print(f"    {'profit advantage':40s}", end="")
+    for sub in subsets:
+        mpc_profit = float(np.mean([d["total_profit"] for d in agg[sub["id"]]["economic_mpc"]]))
+        ems_profit = float(np.mean([d["total_profit"] for d in agg[sub["id"]]["ems_clamps"]]))
+        print(f"  {(mpc_profit - ems_profit):+14.3f}", end="")
+    print()
 
 
 def _run_big_experiment(n_days_per_subset: int) -> None:
-    """Run the 3-subset x 8-strategy big experiment.
+    """Run the 3-subset x 5-strategy big experiment.
 
     Subsets:
       - calm:     N lowest intraday-spread days, sigma_mhz_mult = 1.0
@@ -497,7 +478,6 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
     thp = ThermalParams()
     elp = ElectricalParams()
     pp = PackParams()
-    reg_ctrl_p = RegControllerParams()
     reg_p_nominal = RegulationParams()                                # sigma_mhz_mult=1.0
     reg_p_stressed = RegulationParams(sigma_mhz_mult=2.0)              # 2x activation stress
 
@@ -548,14 +528,14 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
                 forecast_e, forecast_r, probs,
                 realized_e, realized_r,
                 bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
-                reg_ctrl_p, sub["reg_p"], pp, trace_dir,
+                sub["reg_p"], pp, trace_dir,
             ))
 
     strat_names = [n for n, _ in BIG_STRATEGY_FACTORIES]
     n_workers = min(len(jobs), max(1, multiprocessing.cpu_count() - 1), 2)
 
     print("=" * 110)
-    print("  V5 BIG EXPERIMENT — Real German Market Data, 3 subsets x 8 strategies")
+    print("  V5 BIG EXPERIMENT — Real German Market Data, 3 subsets x 5 strategies")
     print("=" * 110)
     print(f"  Battery:    {bp.E_nom_kwh:.0f} kWh / {bp.P_max_kw:.0f} kW")
     print(f"  Subsets:    {[s['id'] for s in subsets]}")
@@ -799,7 +779,8 @@ def main() -> None:
     parser.add_argument(
         "--big", action="store_true",
         help="Run the big experiment: 3 subsets (calm/volatile/stressed) "
-             "x 8 strategies (full ladder + PI on/off MPC variants).",
+             "x 5 strategies (rule_based, deterministic_lp, ems_clamps, "
+             "tracking_mpc, economic_mpc).",
     )
     parser.add_argument(
         "--big-n", type=int, default=5,
@@ -843,7 +824,6 @@ def main() -> None:
     thp = ThermalParams()
     elp = ElectricalParams()
     pp = PackParams()
-    reg_ctrl_p = RegControllerParams()
     reg_p = RegulationParams()
 
     # Load real prices
@@ -879,7 +859,7 @@ def main() -> None:
             day_idx, forecast_e, forecast_r, probs,
             realized_e, realized_r,
             bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
-            reg_ctrl_p, reg_p, pp,
+            reg_p, pp,
         ))
 
     # Run with multiprocessing

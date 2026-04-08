@@ -47,12 +47,11 @@ bess/
 │   ├── simulator/             ←   strategy spec, traces, linear core loop
 │   └── visualization/
 ├── strategies/                ← one folder per strategy (recipe + README)
-│   ├── rule_based/
-│   ├── deterministic_lp/
-│   ├── ems_clamps/            ← sanity-check only, not in pitch deck
-│   ├── ems_pi/                ← sanity-check only, not in pitch deck
-│   ├── tracking_mpc/          ← sanity-check only, not in pitch deck
-│   └── economic_mpc/          ← production v5 strategy
+│   ├── rule_based/            ← naive baseline
+│   ├── deterministic_lp/      ← commercial baseline (LP, mean-substitution)
+│   ├── ems_clamps/            ← canonical "EMS alone" (stochastic EMS, no MPC)
+│   ├── tracking_mpc/          ← sanity control (known F2 bug, not pitch)
+│   └── economic_mpc/          ← production v5 strategy (EMS + MPC)
 ├── comparison/                ← strategy comparison harness
 ├── presentation/              ← B2B pitch deck generator
 └── results/

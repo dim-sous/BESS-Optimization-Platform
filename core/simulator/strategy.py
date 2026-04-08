@@ -1,9 +1,15 @@
 """Strategy — composition recipe for the linear simulator.
 
-A Strategy is a frozen dataclass that names which planner, MPC, and PI
-controller the simulator should use. The simulator's main loop has zero
-strategy-specific branches: it just calls `strategy.planner.solve(...)`,
-optionally `strategy.mpc.solve(...)`, optionally `strategy.pi.compute(...)`.
+A Strategy is a frozen dataclass that names which planner and (optional)
+MPC the simulator should use. The simulator's main loop has zero
+strategy-specific branches: it just calls `strategy.planner.solve(...)`
+and optionally `strategy.mpc.solve(...)`.
+
+Activation tracking lives in the plant (RF1, 2026-04-15). There is no
+strategy-layer PI controller — the cleanup commit on 2026-04-15 deleted
+the PI class, the `pi_enabled` flag, and all `_no_pi` strategy variants
+because empirically they were ceremonial post-RF1 (PI on/off deltas
+≤ $0.03/day across all regimes).
 
 Adding a new strategy means writing a new file under `strategies/<name>/`
 that returns a `Strategy(...)` instance. No simulator changes required.
@@ -41,28 +47,17 @@ class _MPCLike(Protocol):
     def solve(self, *args, **kwargs) -> np.ndarray: ...
 
 
-class _PILike(Protocol):
-    def compute(
-        self,
-        setpoint_pnet: float,
-        p_reg_committed: float,
-        activation_signal: float,
-        soc_current: float,
-    ) -> tuple[np.ndarray, float]: ...
-
-
 @dataclass(frozen=True)
 class Strategy:
-    """A composition of (planner, mpc, pi) with metadata.
+    """A composition of (planner, mpc) with metadata.
 
-    Any of `mpc` and `pi` can be `None`. Strategies that omit `mpc` use
-    the planner's hourly setpoint directly at every minute. Strategies
-    that omit `pi` apply activation modulation in an open-loop way
-    (the simulator dispatches them via the `open_loop_dispatch` helper).
+    `mpc` can be `None`. Strategies that omit `mpc` use the planner's
+    hourly setpoint directly at every plant step (the simulator
+    dispatches them via the `_open_loop_dispatch` helper, which is now
+    a trivial passthrough since the plant handles activation
+    internally).
     """
     name: str
     planner: _PlannerLike
     mpc: Optional[_MPCLike] = None
-    pi: Optional[_PILike] = None
-    pi_enabled: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)

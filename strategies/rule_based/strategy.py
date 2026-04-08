@@ -1,4 +1,4 @@
-"""Rule-based strategy: naive price-sorted dispatch, no regulation, no MPC, no PI.
+"""Rule-based strategy: naive price-sorted dispatch, no regulation, no MPC.
 
 This is the strict lower bound for the comparison. It demonstrates what
 a buyer would get from a basic in-house dispatcher with no optimization
@@ -22,10 +22,9 @@ def make_strategy(bp: BatteryParams, **_unused) -> Strategy:
         name="rule_based",
         planner=RuleBasedPlanner(bp),
         mpc=None,
-        pi=None,
         metadata={
             "label": "Rule-Based",
             "pitch_visible": True,
-            "description": "Naive price-sorted schedule, no FCR, no MPC, no PI.",
+            "description": "Naive price-sorted schedule, no FCR, no MPC.",
         },
     )

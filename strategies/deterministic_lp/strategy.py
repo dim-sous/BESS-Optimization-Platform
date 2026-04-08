@@ -1,7 +1,7 @@
-"""Deterministic LP strategy: commercial-baseline planner, no MPC, no PI.
+"""Deterministic LP strategy: commercial-baseline planner, no MPC.
 
 The honest "what every commercial BESS EMS vendor ships" baseline.
-A perfect-foresight LP over the forecast-mean prices, no closed-loop
+A rolling-horizon LP over the forecast-mean prices, no closed-loop
 controller. Beating this is the v5 product's job.
 """
 
@@ -28,10 +28,9 @@ def make_strategy(
         name="deterministic_lp",
         planner=DeterministicLP(bp, tp, ep, thp),
         mpc=None,
-        pi=None,
         metadata={
             "label": "Commercial Baseline (LP)",
             "pitch_visible": True,
-            "description": "Perfect-foresight rolling-horizon LP, no closed-loop controller.",
+            "description": "Rolling-horizon LP over forecast-mean prices, no closed-loop controller.",
         },
     )

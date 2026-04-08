@@ -281,27 +281,6 @@ class MPCParams:
 
 
 @dataclass(frozen=True)
-class RegControllerParams:
-    """Feedforward regulation controller for activation signal tracking.
-
-    Modifies the MPC base power setpoint to deliver the grid's activation
-    signal.  SOC safety clamps prevent regulation delivery when the battery
-    lacks headroom.
-
-    Safety zones (linear scale-down):
-      - Below soc_safety_low:  reduce delivery linearly to zero at soc_cutoff_low
-      - Above soc_safety_high: reduce delivery linearly to zero at soc_cutoff_high
-    """
-
-    soc_safety_low: float = 0.15       # Start reducing reg below this SOC  [-]
-    soc_safety_high: float = 0.85      # Start reducing reg above this SOC  [-]
-    soc_cutoff_low: float = 0.12       # Zero reg delivery below this SOC  [-]
-    soc_cutoff_high: float = 0.88      # Zero reg delivery above this SOC  [-]
-    recovery_gain: float = 0.005       # SOC recovery proportional gain  [-]  (RF1: reduced from 0.05 since bias now fires every step)
-    recovery_deadband: float = 0.05    # Activation deadband for recovery  [-]
-
-
-@dataclass(frozen=True)
 class RegulationParams:
     """Revenue and penalty model for FCR regulation activation.
 

@@ -38,7 +38,6 @@ from core.config.parameters import (
     MHEParams,
     MPCParams,
     PackParams,
-    RegControllerParams,
     RegulationParams,
     ThermalParams,
     TimeParams,
@@ -51,21 +50,6 @@ from core.simulator.strategy import Strategy
 from core.simulator.traces import SimTraces
 
 logger = logging.getLogger(__name__)
-
-
-def _open_loop_dispatch(
-    setpoint_pnet: float,
-    p_reg_committed: float,
-) -> np.ndarray:
-    """Trivial passthrough used by strategies without a PI layer.
-
-    RF1 (2026-04-15): activation tracking lives in the plant now, so
-    an "open loop" strategy literally has nothing to do — it just hands
-    the EMS plan's hourly setpoint straight through to the plant, and
-    the plant applies activation on top. Used by RULE_BASED,
-    DETERMINISTIC_LP, and EMS_CLAMPS.
-    """
-    return np.array([setpoint_pnet, p_reg_committed])
 
 
 def run_simulation(
@@ -83,15 +67,14 @@ def run_simulation(
     mhe_p: MHEParams,
     thp: ThermalParams,
     elp: ElectricalParams,
-    reg_ctrl_p: RegControllerParams,
     reg_p: RegulationParams,
     pp: PackParams | None = None,
 ) -> dict:
     """Execute a strategy end-to-end and return the result dict.
 
-    The strategy decides what's wired together (planner / mpc / pi); this
+    The strategy decides what's wired together (planner / mpc); this
     function decides WHEN each layer runs (the multi-rate cadence) and
-    routes data between them.
+    routes data between them. Activation tracking lives in the plant.
     """
     # ---- Setup ----
     use_pack = pp is not None
@@ -196,21 +179,12 @@ def run_simulation(
             )
             mpc_idx += 1
 
-        # 3. Per-step: PI (or open-loop) shapes the setpoint, plant applies
-        # activation internally and integrates. RF1 (2026-04-15): strategies
-        # no longer see activation_k. The plant is the BESS controller.
+        # 3. Per-step: hand the held setpoint straight to the plant.
+        # RF1 (2026-04-15): activation tracking lives in the plant. The
+        # 2026-04-15 cleanup deleted the strategy-layer PI controller
+        # entirely (it was empirically ceremonial post-RF1).
         activation_k = float(activation[k])
-        if strategy.pi is not None and strategy.pi_enabled:
-            u_command = strategy.pi.compute(
-                setpoint_pnet=setpoint_pnet,
-                p_reg_committed=setpoint_preg,
-                soc_current=state_est[0],
-            )
-        else:
-            u_command = _open_loop_dispatch(
-                setpoint_pnet=setpoint_pnet,
-                p_reg_committed=setpoint_preg,
-            )
+        u_command = np.array([setpoint_pnet, setpoint_preg])
 
         # 4. Plant integrates with the real activation sample and reports
         # the actually-applied power + actually-delivered FCR power.

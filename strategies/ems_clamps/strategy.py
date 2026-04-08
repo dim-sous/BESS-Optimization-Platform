@@ -1,10 +1,15 @@
-"""EMS_CLAMPS — sanity check: stochastic EMS planner + open-loop dispatch.
+"""EMS_CLAMPS — canonical "EMS alone" strategy.
 
-NOT pitch-visible. This isolates the value of the stochastic EMS planner
-on its own (vs the deterministic LP) by running it through the same
-open-loop execution path as DETERMINISTIC_LP. If EMS_CLAMPS doesn't beat
-DETERMINISTIC_LP, the stochastic formulation isn't adding value beyond
-what perfect-foresight-mean already gets.
+Stochastic EMS planner solving the two-stage scenario program hourly,
+plus a trivial passthrough dispatch (the plant handles activation
+internally post-RF1, so "open-loop dispatch" is literally a no-op
+forward of the EMS hourly setpoint).
+
+Renamed semantically by the 2026-04-15 cleanup: previously called a
+"sanity check" against deterministic_lp, this is now the canonical
+"EMS alone, no MPC layer" strategy. The current pitch hypothesis is
+that economic_mpc must be strictly >= ems_clamps on every metric to
+justify the MPC layer's existence.
 """
 
 from __future__ import annotations
@@ -32,10 +37,9 @@ def make_strategy(
         name="ems_clamps",
         planner=EconomicEMS(bp, tp, ep, thp, elp),
         mpc=None,
-        pi=None,
         metadata={
-            "label": "Stochastic EMS (sanity)",
-            "pitch_visible": False,
-            "description": "Stochastic EMS planner + open-loop dispatch (sanity check).",
+            "label": "Stochastic EMS (alone)",
+            "pitch_visible": True,
+            "description": "Stochastic EMS planner + trivial dispatch. Canonical 'EMS alone' baseline.",
         },
     )
