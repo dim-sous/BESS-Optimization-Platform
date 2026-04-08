@@ -40,59 +40,9 @@ was false on inspection).
 - The current source code
 - The 5-strategy ladder (verified in
   [comparison/run_v5_comparison.py](comparison/run_v5_comparison.py))
-- The fresh 5-day big experiment ran on this HEAD (2026-04-15,
-  post-purge) — results below
+- One reproduced empirical data point: the cleanup sanity test on day 0
+  produced LP $53.99, ems_clamps $54.78, economic_mpc $54.02
 - The user's restated proposition (below)
-
-### New canonical baseline (2026-04-15, post trust-reset, 5 days × 3 subsets × 5 strategies, 33 min wall)
-
-All numbers from a fresh run on the current HEAD at
-[results/v5_big_experiment.json](results/v5_big_experiment.json). These
-are the only empirical numbers that should be trusted going forward.
-
-**Net profit ($/day mean):**
-
-| Strategy | Calm | Volatile | Stressed |
-|---|---|---|---|
-| rule_based      |  0.09 |  3.75 |  0.22 |
-| deterministic_lp| 18.61 | 31.12 | 19.79 |
-| **ems_clamps**  | **18.68** | **31.39** | **20.29** |
-| tracking_mpc    | 18.49 | 31.10 | 18.68 |
-| economic_mpc    | 18.49 | 30.86 | 20.07 |
-
-**Headline (economic_mpc − ems_clamps):** **−$0.19 / −$0.52 / −$0.22**
-per day. **The proposition is empirically false on all three regimes.**
-
-**Ladder deltas:**
-- rule_based → LP: +$18.52 / +$27.37 / +$19.57 (huge, the value of
-  optimization itself)
-- LP → ems_clamps: +$0.07 / +$0.27 / +$0.50 (small but monotone with
-  disturbance — the real stochastic-optimization signal)
-- ems_clamps → economic_mpc: −$0.19 / −$0.52 / −$0.22 (negative — MPC
-  layer costs money)
-- ems_clamps → tracking_mpc: −$0.19 / −$0.29 / −$1.61 (also negative,
-  craters under stress)
-
-**Non-numeric observations:**
-- Delivery scores cluster at 76–79% across strategies and regimes.
-  Everyone misses some delivery; the cheat is gone.
-- tracking_mpc in stressed: 276 P_max touches/day, 76.2% delivery
-  (lowest), 47% higher SOH degradation than other MPCs.
-- economic_mpc in stressed: 0 P_max touches, 77.9% delivery, SOH same
-  as ems_clamps.
-- MPC solve time: ~0.04 s/step (warm-start IPOPT), ~60 per hour ×
-  24 hours ≈ 57 s/day of pure solver work, roughly matching the ~100
-  s/day wall time after EMS and EKF overhead.
-- Wall time ratio: rule_based 7s · LP 7s · ems_clamps 40s · tracking_mpc
-  92s · economic_mpc 106s per day. economic_mpc costs 2.7× ems_clamps
-  in compute for negative return.
-
-**Biggest single-day MPC loss vs ems_clamps (for the investigation):**
-volatile day 38, economic_mpc $19.63 vs ems_clamps $20.56, delta
-−$0.932. Traces are not persisted for this day (harness persists
-first-day-per-subset only). Next-best persisted target: stressed day
-41 (−$0.31 gap, traces in
-[results/v5_big_traces/stressed_{strategy}_day41.npz](results/v5_big_traces/)).
 
 ### Restated proposition (user-approved, 2026-04-15)
 
@@ -135,15 +85,17 @@ the next concrete deliverable.
 
 ### Pending work
 
-1. ✅ **Ground truth re-established.** 1-day sanity + 5-day big
-   experiment landed on current HEAD (2026-04-15). Results above.
-2. **Investigate the value leak.** Walk stressed day 41 (persisted
-   traces) hour-by-hour, comparing `economic_mpc` against `ems_clamps`,
-   and find where the MPC strategy loses money. The investigation is
-   a *reading*, not an experiment — output is a precise diagnosis with
-   code citations. If the pattern is clear, generalize to the volatile
-   regime where the gap is biggest. If not, re-run volatile day 38
-   with targeted trace persistence.
+1. **Re-establish empirical ground truth.** Run a fresh single-day
+   sanity on the current HEAD (5 strategies) and a fresh 5-day big
+   experiment (3 subsets × 5 strategies). The output of these runs
+   becomes the only trusted empirical baseline going forward. Cost:
+   ~75 minutes wall.
+2. **Investigate the value leak** (after step 1 produces a baseline).
+   Walk one specific day hour-by-hour, comparing `economic_mpc`
+   against `ems_clamps`, and find where the MPC strategy loses money
+   relative to the EMS-alone strategy. The investigation is a *reading*,
+   not an experiment — output is a precise diagnosis with code
+   citations, not a fix proposal.
 3. **Decide on next direction** based on the diagnosis.
 
 ### How to resume after a session break
