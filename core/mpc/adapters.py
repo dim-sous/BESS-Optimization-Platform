@@ -1,16 +1,21 @@
 """MPC adapters — uniform interface for the linear simulator.
 
 Both `TrackingMPC` and `EconomicMPC` have varied `solve()` signatures
-because they take different inputs (tracking refs vs forecast prices vs
-activation observation). The linear simulator expects a single shape:
+because they take different inputs (tracking refs vs forecast prices).
+The linear simulator expects a single shape:
 
     setpoint_pnet, setpoint_preg, failed = adapter.solve_setpoint(
-        state_est, plan, forecast_e, probs, recent_activation,
+        state_est, plan, forecast_e, probs,
         sim_step, steps_per_ems, steps_per_mpc, u_prev,
     )
 
 Each adapter wraps one underlying MPC and converts its (chg, dis, reg)
 output into a single signed `P_net = dis - chg`.
+
+RF1 (2026-04-15): neither adapter takes `recent_activation` anymore.
+Activation tracking lives in the plant; the MPC plans against the
+expected activation magnitude (constant) instead of the most recent
+sample.
 """
 
 from __future__ import annotations
@@ -48,7 +53,6 @@ class TrackingMPCAdapter:
         plan: Plan,
         forecast_e: np.ndarray,        # (n_scenarios, n_hours)
         probabilities: np.ndarray,
-        recent_activation: float,      # ignored by tracking MPC
         sim_step: int,
         steps_per_ems: int,
         steps_per_mpc: int,
@@ -116,7 +120,6 @@ class EconomicMPCAdapter:
         plan: Plan,
         forecast_e: np.ndarray,        # (n_scenarios, n_hours)
         probabilities: np.ndarray,
-        recent_activation: float,
         sim_step: int,
         steps_per_ems: int,
         steps_per_mpc: int,
@@ -155,7 +158,6 @@ class EconomicMPCAdapter:
             p_reg_ref=pr_win,
             price_e_horizon=price_e_horizon,
             p_reg_committed_horizon=pr_win,
-            current_activation=recent_activation,
             u_prev=u_prev_3,
         )
         p_net = float(u_cmd_3[1] - u_cmd_3[0])

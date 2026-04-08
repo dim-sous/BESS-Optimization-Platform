@@ -1,30 +1,22 @@
-"""Economic + Activation-Aware MPC.
+"""Economic MPC.
 
-v5_regulation_activation, Step 3 + activation-awareness extension.
+v5_regulation_activation, Step 3.
 
-Two design changes vs TrackingMPC:
+**Economic objective** with soft EMS anchor instead of hard reference
+tracking. MPC sees forecast prices (energy + FCR capacity, both as
+probability-weighted forecast means — never the realized prices) and
+trades arbitrage profit against degradation and a soft penalty on
+deviating from the EMS SOC plan.
 
-1. **Economic objective** with soft EMS anchor instead of hard reference
-   tracking. MPC sees forecast prices (energy + FCR capacity, both as
-   probability-weighted forecast means — never the realized prices) and
-   trades arbitrage profit against degradation and a soft penalty on
-   deviating from the EMS SOC plan.
-
-2. **Activation-aware regulation forecast.** This is the actual
-   information edge that MPC has over LP/EMS planners:
-     - The current observed activation sample (latest grid frequency
-       droop response, in [-1, +1]) is passed in at solve time.
-     - The MPC forecasts persistence using the OU correlation time
-       (tau ~ 300 s for the CE synchronous area frequency model):
-         a_forecast[k] = current_activation * exp(-k * dt_mpc / tau)
-     - The expected regulation dispatch P_reg_dispatch[k] =
-       a_forecast[k] * P_reg_committed[k] is injected into the
-       prediction model: positive activation drains SOC, negative
-       activation charges it.
-     - The MPC then plans its P_chg / P_dis to maintain SOC headroom
-       for the upcoming dispatch. This is precisely what LP / EMS
-       cannot do — they run hourly with average activation and cannot
-       react to sub-minute persistence.
+RF1 (2026-04-15): the previous "activation-aware OU persistence
+forecast" was removed. It used the latest ground-truth activation
+sample, which is a cheat — on real hardware the MPC cannot see the
+grid signal at sub-minute granularity. The activation signal lives
+inside the plant now (it *is* the BESS controller). MPC plans SOC
+as if activation will take its expected value (zero signed mean),
+which is correct given that the OU activation process is symmetric
+around zero. The MPC's edge over LP/EMS comes from re-planning
+against the live EKF state estimate, not from peeking at the grid.
 
 P_reg is treated as **exogenous** (parameter, not decision variable).
 The simulator passes ``P_reg_committed`` from the EMS hourly plan,
@@ -106,9 +98,6 @@ class EconomicMPC:
         reg_p = self.reg_p
         ep = self.ep
 
-        # OU activation correlation time (matches activation_generator.py)
-        TAU_OU_S = 300.0
-
         opti = ca.Opti()
 
         # ---- Decision variables ----
@@ -131,11 +120,6 @@ class EconomicMPC:
         price_e_p = opti.parameter(N)                 # forecast $/kWh per step
         # P_reg committed by EMS, ZOH per MPC step (already exogenous)
         p_reg_committed_p = opti.parameter(N)
-        # Activation awareness: latest observed grid activation in [-1, +1].
-        # This is the MPC's information edge over LP/EMS — it sees the
-        # current sub-minute grid state, while planners only see hourly
-        # statistics. Forecast persistence via OU exponential decay below.
-        current_activation_p = opti.parameter()
 
         # ---- 2-state integrator with SOH parameter ----
         F_mpc = _build_2state_integrator(
@@ -148,36 +132,24 @@ class EconomicMPC:
 
         dt_h = self.tp.dt_mpc / 3600.0          # hours per MPC step
         dt_s = self.tp.dt_mpc                    # seconds per MPC step
-        # Smooth |x|  and  smooth max(0, x)  for differentiability
-        eps_abs = 1e-3
-        smooth_abs = lambda x: ca.sqrt(x * x + eps_abs * eps_abs)
-        smooth_pos = lambda x: 0.5 * (x + smooth_abs(x))
 
         cost = 0.0
 
         for k in range(N):
             j = min(k, Nc - 1)   # control horizon blocking
 
-            # ---- Activation-aware reg dispatch forecast ----
-            # OU mean-reverting forecast: a[k] = a_obs * exp(-k*dt/tau).
-            # Sign convention: positive activation = grid frequency low =
-            # discharge demand, drains SOC. Negative = charge demand.
-            a_decay = float(np.exp(-k * self.tp.dt_mpc / TAU_OU_S))
-            a_forecast_k = current_activation_p * a_decay
-            # Expected reg dispatch for this MPC step (signed kW).
-            P_reg_dispatch_k = a_forecast_k * p_reg_committed_p[k]
-            # Decompose into effective charge / discharge contributions
-            # so the integrator's SOC dynamics see the right sign.
-            P_dis_extra = smooth_pos(P_reg_dispatch_k)
-            P_chg_extra = smooth_pos(-P_reg_dispatch_k)
+            # RF1 (2026-04-15): the activation-aware OU forecast was
+            # removed. The expected signed activation over the horizon
+            # is zero (symmetric OU process around zero), so there is
+            # no SOC pre-positioning term. The expected delivery
+            # payment is constant w.r.t. the decision variables
+            # (P_reg is exogenous) and has also been dropped from the
+            # cost — it cannot influence the optimum.
 
-            # ---- Effective inputs to the prediction model ----
-            # Charge / discharge include the planned-action plus the
-            # expected-reg-dispatch. Reg input is the absolute committed
-            # reg power so thermal Joule heating is correctly accounted.
-            eff_P_chg = P_chg[j] + P_chg_extra
-            eff_P_dis = P_dis[j] + P_dis_extra
-            u_k_eff = ca.vertcat(eff_P_chg, eff_P_dis, p_reg_committed_p[k])
+            # ---- Prediction model inputs ----
+            # Reg input is the absolute committed reg power so thermal
+            # Joule heating is correctly accounted.
+            u_k_eff = ca.vertcat(P_chg[j], P_dis[j], p_reg_committed_p[k])
 
             x2_k = ca.vertcat(SOC[k], TEMP[k])
             x2_next = F_mpc(x2_k, u_k_eff, soh_p)
@@ -187,10 +159,6 @@ class EconomicMPC:
             # ---- Cost terms (cost = -profit on the planning variables) ----
             # Energy arbitrage profit (negative cost = profit)
             cost += -mp.w_e * price_e_p[k] * (P_dis[j] - P_chg[j]) * dt_h
-
-            # Expected delivery payment (uses per-step activation forecast)
-            expected_delivered = smooth_abs(a_forecast_k) * p_reg_committed_p[k]
-            cost += -mp.w_del * reg_p.price_activation * expected_delivered * dt_h
 
             # Degradation cost on the planned-action chg/dis only
             # (split form matches plant/EMS/accounting). Reg-power
@@ -283,7 +251,6 @@ class EconomicMPC:
         self._u_prev_p = u_prev_p
         self._price_e_p = price_e_p
         self._p_reg_committed_p = p_reg_committed_p
-        self._current_activation_p = current_activation_p
 
     # ------------------------------------------------------------------
     #  Solve
@@ -298,7 +265,6 @@ class EconomicMPC:
         p_reg_ref: np.ndarray,
         price_e_horizon: np.ndarray,
         p_reg_committed_horizon: np.ndarray,
-        current_activation: float,
         u_prev: np.ndarray | None = None,
     ) -> np.ndarray:
         """Compute the economic-MPC control action.
@@ -310,10 +276,6 @@ class EconomicMPC:
         p_chg_ref/p_dis_ref/p_reg_ref : ndarray (N,) — EMS refs (fallback only)
         price_e_horizon          : ndarray (N,) FORECAST energy price ZOH [$/kWh]
         p_reg_committed_horizon  : ndarray (N,) committed FCR power ZOH from EMS plan [kW]
-        current_activation       : float in [-1, +1] — latest observed
-                                   grid activation, used as the initial
-                                   condition for the OU persistence
-                                   forecast (the MPC's information edge).
         u_prev                   : ndarray (3,) — previous u_cmd
 
         Returns
@@ -346,7 +308,6 @@ class EconomicMPC:
         opti.set_value(self._u_prev_p, u_prev)
         opti.set_value(self._price_e_p, price_e)
         opti.set_value(self._p_reg_committed_p, p_reg_committed)
-        opti.set_value(self._current_activation_p, float(current_activation))
 
         # Warm-start
         if self._prev_P_chg is not None:

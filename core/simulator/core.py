@@ -166,14 +166,14 @@ def run_simulation(
             mpc_failed = False
             if strategy.mpc is not None:
                 t0_mpc = time.perf_counter()
-                # Most recently observed activation sample (the MPC's edge)
-                recent_activation = float(activation[k - 1]) if k > 0 else 0.0
+                # RF1 (2026-04-15): MPC no longer receives recent_activation.
+                # Activation lives in the plant; MPC plans against the
+                # expected (zero signed mean) activation.
                 setpoint_pnet, setpoint_preg, mpc_failed = strategy.mpc.solve_setpoint(
                     state_est=state_est,
                     plan=plan,
                     forecast_e=e_window,
                     probabilities=probabilities,
-                    recent_activation=recent_activation,
                     sim_step=k,
                     steps_per_ems=steps_per_ems,
                     steps_per_mpc=steps_per_mpc,
