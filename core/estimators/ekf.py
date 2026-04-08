@@ -152,7 +152,7 @@ class ExtendedKalmanFilter:
         x_pred = self._f_eval(self.x_hat, u)
         x_pred[0] = np.clip(x_pred[0], 0.0, 1.0)
         x_pred[1] = np.clip(x_pred[1], 0.5, 1.0)
-        x_pred[2] = np.clip(x_pred[2], -20.0, 80.0)
+        x_pred[2] = np.clip(x_pred[2], -10.0, 80.0)
         x_pred[3] = np.clip(x_pred[3], -2.0, 2.0)
         x_pred[4] = np.clip(x_pred[4], -2.0, 2.0)
 

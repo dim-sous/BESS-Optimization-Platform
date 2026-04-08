@@ -232,9 +232,9 @@ def build_casadi_dynamics_3state(
 ) -> ca.Function:
     """Return a 3-state CasADi ODE  f(x, u) -> x_dot  for the EMS layer.
 
-    Omits V_rc1/V_rc2 dynamics (they decay to zero within one EMS step)
-    while still using the OCV polynomial for improved thermal accuracy
-    over v3's constant-voltage model.
+    Omits V_rc1/V_rc2 dynamics (they decay within ~tau_2 = 400 s, much
+    less than dt_ems = 3600 s) while still using the OCV polynomial
+    for improved thermal accuracy over v3's constant-voltage model.
 
     When expected_activation_frac > 0, the SOC dynamics include the expected
     energy drain from regulation delivery.  Symmetric activation (equal UP/DOWN)
@@ -303,7 +303,11 @@ def build_casadi_rk4_integrator_3state(
 ) -> ca.Function:
     """Return a single-step RK4 integrator for the 3-state EMS model.
 
-    No sub-stepping needed — all 3-state dynamics are slow (tau >> dt_ems).
+    No sub-stepping. The slowest dynamic is the thermal mode with
+    tau = C_thermal/h_cool = 3000 s, comparable to dt_ems = 3600 s.
+    A single RK4 step is borderline-stable (RK4 stability boundary is
+    dt/tau ~ 2.78); the resulting integration error on the temperature
+    state is acceptable at the EMS planning resolution.
 
     Returns
     -------

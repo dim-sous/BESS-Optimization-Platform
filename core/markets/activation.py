@@ -159,8 +159,3 @@ class ActivationSignalGenerator:
             self._rng = np.random.default_rng(seed)
         else:
             self._rng = np.random.default_rng(self._rp.activation_seed)
-
-    @property
-    def transition_matrix(self) -> np.ndarray:
-        """Kept for backward compatibility. Returns empty array."""
-        return np.array([])

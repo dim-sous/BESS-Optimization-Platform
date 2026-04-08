@@ -48,7 +48,6 @@ from core.config.parameters import (  # noqa: E402
     EKFParams,
     ElectricalParams,
     EMSParams,
-    MHEParams,
     MPCParams,
     PackParams,
     RegulationParams,
@@ -132,13 +131,13 @@ def _run_single_day(args: tuple) -> dict:
     """Run all configured strategies for one day. Designed for Pool.map."""
     (day_idx, forecast_e, forecast_r, probabilities,
      realized_e_prices, realized_r_prices,
-     bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
+     bp, tp, ep, mp, ekf_p, thp, elp,
      reg_p, pp) = args
 
     logging.disable(logging.WARNING)
 
     params = dict(
-        bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p, mhe_p=mhe_p,
+        bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p,
         thp=thp, elp=elp, reg_p=reg_p, pp=pp,
     )
 
@@ -249,7 +248,7 @@ def _run_big_job(args: tuple) -> dict:
       (subset_id, day_idx, persist_first_day,
        forecast_e, forecast_r, probabilities,
        realized_e, realized_r,
-       bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
+       bp, tp, ep, mp, ekf_p, thp, elp,
        reg_p, pp,
        trace_dir)
 
@@ -260,13 +259,13 @@ def _run_big_job(args: tuple) -> dict:
     (subset_id, day_idx, persist_first_day,
      forecast_e, forecast_r, probabilities,
      realized_e, realized_r,
-     bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
+     bp, tp, ep, mp, ekf_p, thp, elp,
      reg_p, pp, trace_dir) = args
 
     logging.disable(logging.WARNING)
 
     params = dict(
-        bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p, mhe_p=mhe_p,
+        bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p,
         thp=thp, elp=elp, reg_p=reg_p, pp=pp,
     )
 
@@ -474,7 +473,6 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
     ep = EMSParams()
     mp = MPCParams()
     ekf_p = EKFParams()
-    mhe_p = MHEParams()
     thp = ThermalParams()
     elp = ElectricalParams()
     pp = PackParams()
@@ -527,7 +525,7 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
                 sub["id"], day_idx, (i == 0),
                 forecast_e, forecast_r, probs,
                 realized_e, realized_r,
-                bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
+                bp, tp, ep, mp, ekf_p, thp, elp,
                 sub["reg_p"], pp, trace_dir,
             ))
 
@@ -820,7 +818,6 @@ def main() -> None:
     ep = EMSParams()
     mp = MPCParams()
     ekf_p = EKFParams()
-    mhe_p = MHEParams()
     thp = ThermalParams()
     elp = ElectricalParams()
     pp = PackParams()
@@ -858,7 +855,7 @@ def main() -> None:
         jobs.append((
             day_idx, forecast_e, forecast_r, probs,
             realized_e, realized_r,
-            bp, tp, ep, mp, ekf_p, mhe_p, thp, elp,
+            bp, tp, ep, mp, ekf_p, thp, elp,
             reg_p, pp,
         ))
 

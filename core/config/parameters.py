@@ -37,25 +37,22 @@ class BatteryParams:
 
     At T_ref (25 degC): kappa = 1.0.  At 45 degC: kappa ~ 1.66.
 
-    Calibration (literature-grounded, v5)
-    --------------------------------------
-    Industry Li-ion BESS in grid service degrade at ~1.0-2.0 %/yr depending
-    on duty cycle (sources: ScienceDirect 2024 utility-scale 3-yr study,
-    1.37 %/yr at 356 FCE/yr; MDPI wear-density 10-yr FCR projection, <2 %/yr).
+    Calibration constants
+    ---------------------
+    alpha_deg, alpha_deg_reg are tuned to give physically-plausible
+    Li-ion grid-service degradation under the active multi-cell pack
+    truth model (`BatteryPack(n_cells=4)`). The actual /yr rate the
+    model produces is whatever the simulator measures end-to-end —
+    this docstring deliberately does not assert a target /yr number,
+    because under the multi-cell pack each cell sees only P_pack/n_cells
+    of the throughput and prior versions of this comment quoted a rate
+    that did not match the running model.
 
-    alpha_deg target: 1 FCE/day arbitrage -> 1.37 %/yr -> 3.75e-5 SOH/day.
-       1 FCE = 2 * E_nom_kwh = 400 kWh throughput = 1.44e6 kW*s.
-       alpha_deg = 3.75e-5 / 1.44e6 ~= 2.6e-11 /(kW*s).
+    Ratio: alpha_deg_reg = alpha_deg / 5 (FCR shallow cycling is
+    empirically ~5x less damaging per kWh than deep arbitrage cycles).
 
-    alpha_deg_reg target: continuous P_reg = 30 kW for 1 day contributes
-       ~0.5 %/yr (FCR is shallow symmetric cycling, empirically ~5x less
-       damaging per kWh of throughput than deep arbitrage cycles).
-       30 * 86400 = 2.59e6 kW*s/day; 0.5 %/yr = 1.37e-5 SOH/day;
-       alpha_deg_reg = 1.37e-5 / 2.59e6 ~= 5.3e-12 ~= alpha_deg / 5.
-
-    These values are sanity-checked end-to-end in Step 5a (1-day calibration
-    sim). The previous v1-v4 value of 2.78e-9 was demo-accelerated (~107x too
-    high) and produced the unphysical 0.71 %/day reported in backlog item #3.
+    The previous v1-v4 value of 2.78e-9 was demo-accelerated (~100x too
+    high) and produced an unphysical 0.71 %/day.
     """
 
     E_nom_kwh: float = 200.0           # Nominal energy capacity  [kWh]
@@ -185,16 +182,6 @@ class ElectricalParams:
         """Total DC resistance [Ohm]: R0 + R1 + R2."""
         return self.R0 + self.R1 + self.R2
 
-    @property
-    def V_min_pack(self) -> float:
-        """Minimum pack voltage [V]."""
-        return self.V_min_cell * self.n_series_cells * 4  # 4 modules
-
-    @property
-    def V_max_pack(self) -> float:
-        """Maximum pack voltage [V]."""
-        return self.V_max_cell * self.n_series_cells * 4  # 4 modules
-
 
 @dataclass(frozen=True)
 class TimeParams:
@@ -289,9 +276,8 @@ class RegulationParams:
       - Delivery payment: price_activation * |P_delivered| * dt  (for following signal)
       - Non-delivery penalty: penalty_mult * price_reg * |P_missed| * dt
 
-    Activation signal model (Markov chain):
-      Three states: IDLE (0), UP (+1), DOWN (-1).
-      Transition probabilities are per 4-second step.
+    Activation signal model: Ornstein-Uhlenbeck grid frequency process
+    + ENTSO-E droop characteristic (see core/markets/activation.py).
     """
 
     price_activation: float = 0.02     # Delivery payment  [$/kWh delivered]
@@ -299,14 +285,6 @@ class RegulationParams:
     delivery_tolerance: float = 0.05   # Allowed delivery error fraction  [-]
     activation_seed: int = 99          # RNG seed for stochastic activation
     sigma_mhz_mult: float = 1.0        # Multiplier on OU frequency std (stress regime)
-
-    # Markov chain transition probabilities  [per step]
-    p_idle_to_up: float = 0.02
-    p_idle_to_down: float = 0.02
-    p_up_to_idle: float = 0.05
-    p_up_to_down: float = 0.01
-    p_down_to_idle: float = 0.05
-    p_down_to_up: float = 0.01
 
 
 class Strategy(str, Enum):
@@ -328,18 +306,10 @@ class Strategy(str, Enum):
                           scenario-based EMS in isolation (uses our own
                           EMS so it would be "cheating" as a commercial
                           baseline).
-        EMS_PI:           EMS + PI, no MPC. Verifies that PI feedback
-                          alone provides much of the regulation-tracking
-                          benefit.
-        FULL:             Tracking-MPC variant of the full stack
-                          (Q_soc=1e4 dominated). Used to demonstrate that
-                          a tracker is dominated by the economic MPC.
     """
 
     RULE_BASED = "rule_based"
     EMS_CLAMPS = "ems_clamps"
-    EMS_PI = "ems_pi"
-    FULL = "full"                       # legacy tracking MPC (sanity check)
     DETERMINISTIC_LP = "deterministic_lp"
     FULL_ECON = "full_econ"
 
@@ -370,34 +340,6 @@ class EKFParams:
     p0_temp: float = 1.0              # Initial temperature uncertainty  [degC^2]
     p0_vrc1: float = 1.0              # Initial V_rc1 uncertainty  [V^2]  [v4]
     p0_vrc2: float = 1.0              # Initial V_rc2 uncertainty  [V^2]  [v4]
-
-
-@dataclass(frozen=True)
-class MHEParams:
-    """Tuning parameters for Moving Horizon Estimation.
-
-    v4: adds V_rc1/V_rc2 arrival cost, V_term measurement weight,
-    and V_rc process noise weights.
-    """
-
-    N_mhe: int = 30                    # Estimation window  [steps at dt_estimator]
-
-    # Arrival cost weights  (inverse of prior covariance)
-    arrival_soc: float = 1e3           # Weight on SOC arrival cost
-    arrival_soh: float = 1e4           # Weight on SOH arrival cost (high -- SOH barely observable)
-    arrival_temp: float = 1e2          # Weight on temperature arrival cost
-    arrival_vrc1: float = 1e2          # Weight on V_rc1 arrival cost  [v4]
-    arrival_vrc2: float = 1e2          # Weight on V_rc2 arrival cost  [v4]
-
-    # Stage cost weights
-    w_soc_meas: float = 1e4            # SOC measurement residual weight
-    w_temp_meas: float = 1e3           # Temperature measurement residual weight
-    w_vterm_meas: float = 1e3          # V_term measurement residual weight  [v4]
-    w_process_soc: float = 1e2         # Process disturbance weight (SOC)
-    w_process_soh: float = 1e8         # Process disturbance weight (SOH, very high)
-    w_process_temp: float = 1e3        # Temperature process disturbance weight
-    w_process_vrc1: float = 1e3        # V_rc1 process disturbance weight  [v4]
-    w_process_vrc2: float = 1e4        # V_rc2 process disturbance weight  [v4]
 
 
 @dataclass(frozen=True)
