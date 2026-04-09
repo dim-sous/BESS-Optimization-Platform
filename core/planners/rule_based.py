@@ -57,12 +57,20 @@ class RuleBasedPlanner:
         n_charge = min(n_hours_needed, n_hours // 3)
         n_discharge = min(n_hours_needed, n_hours // 3)
 
-        charge_hours = order[:n_charge]
-        discharge_hours = order[-n_discharge:]
-        # Only commit if there's a profitable spread on the forecast
-        if prices[discharge_hours[-1]] > prices[charge_hours[-1]]:
-            p_chg[charge_hours] = power
-            p_dis[discharge_hours] = power
+        # Guard tiny horizons / zero capacity before indexing
+        if n_charge > 0 and n_discharge > 0:
+            charge_hours = order[:n_charge]
+            discharge_hours = order[-n_discharge:]
+            # Efficiency-aware break-even: every committed pair must clear
+            # round-trip losses on the forecast. Use min(p_D) vs max(p_C)
+            # so the *worst* round-trip is still in-the-money, not just the
+            # best one. (See arbitrage break-even: p_dis * eta_rt > p_chg.)
+            eta_rt = bp.eta_charge * bp.eta_discharge
+            worst_chg_price = float(prices[charge_hours[-1]])   # most expensive charge hr
+            worst_dis_price = float(prices[discharge_hours[0]]) # cheapest discharge hr
+            if worst_dis_price * eta_rt > worst_chg_price:
+                p_chg[charge_hours] = power
+                p_dis[discharge_hours] = power
 
         return {
             "P_chg_ref": p_chg,

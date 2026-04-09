@@ -35,7 +35,10 @@ BESS EMS today ships some form of this.
 | `α_reg`           | reg-cycling degradation rate                         | 1/(kW·s)              |
 | `c_deg`           | degradation cost                                     | \$/SOH lost           |
 | `T_end`           | endurance horizon                                    | h (= 0.5)             |
-| `W_term`          | terminal-anchor L1 weight                            | \$/SOC-unit (= 500)   |
+| `f_act`           | expected absolute FCR activation                     | — (= `expected_activation_frac`) |
+| `η_loss`          | round-trip loss `η_c − 1/η_d`  (< 0)                 | —                     |
+| `W_term`          | terminal-anchor L1 weight                            | \$/SOC-unit (= `50·E_nom`) |
+| `W_end`           | endurance-slack L1 weight                            | \$/SOC-unit (= `10·W_term`) |
 
 ### Decision variables
 
@@ -44,6 +47,7 @@ P_chg[k] ∈ [0, P_max]      for k = 0..N−1
 P_dis[k] ∈ [0, P_max]      for k = 0..N−1
 P_reg[k] ∈ [0, P_max]      for k = 0..N−1
 z⁺,  z⁻  ≥ 0               (L1 slacks for the terminal anchor)
+ε_end[k] ≥ 0               for k = 0..N−1   (endurance slacks)
 ```
 
 The state `SOC[k]` is **not** a free variable; it is reconstructed from
@@ -52,8 +56,17 @@ the inputs via the linear recursion below.
 ### State recursion (linear, embedded in constraints)
 
 ```
-SOC[k] = SOC_0 + (Δt_h / E_nom) · Σ over j=0..k−1 of [ η_c · P_chg[j] − P_dis[j] / η_d ]
+SOC[k] = SOC_0 + (Δt_h / E_nom) · Σ over j=0..k−1 of [
+             η_c · P_chg[j]  −  P_dis[j] / η_d  +  η_loss · f_act · P_reg[j] ]
 ```
+
+The `η_loss · f_act · P_reg[j]` term is the **expected SOC drift from FCR
+activation**. With symmetric activation, half of `f_act · P_reg` is
+charged (storing `η_c` of it) and half is discharged (drawing `1/η_d`),
+so each kW of committed reg drains SOC at the round-trip-loss rate
+`η_c − 1/η_d ≈ −0.10`. This matches the EMS RK4 integrator
+(`build_casadi_dynamics_3state`) and is what stops the LP from treating
+FCR commitment as free of energy cost.
 
 ### Objective
 
@@ -66,6 +79,7 @@ minimise   Σ over k=0..N−1 of [
               − p_r[k] · P_reg[k] · Δt_h                          ← capacity revenue
               + c_deg · Δt_s · ( α_deg · (P_chg[k] + P_dis[k])
                                + α_reg · P_reg[k] )               ← degradation cost
+              + W_end · ε_end[k]                                  ← endurance slack
             ]
             + W_term · ( z⁺ + z⁻ )                                ← L1 terminal anchor
 ```
@@ -88,12 +102,21 @@ P_dis[k] + P_reg[k] ≤ P_max          for k = 0..N−1
 
 **SOC bounds with FCR endurance margin** (the most-recently-committed
 reg power `P_reg[k−1]` must be sustainable for `T_end` hours in either
-direction without leaving the SOC envelope):
+direction without leaving the SOC envelope). Both bounds are softened
+by a single non-negative slack `ε_end[k−1]` (linearly penalised in the
+objective with weight `W_end`), mirroring the stochastic EMS soft
+endurance pattern so the LP cannot be infeasible-out on edge cases:
 
 ```
-SOC[k] + (T_end · η_c / E_nom)        · P_reg[k−1] ≤ SOC_max     for k = 1..N
-SOC[k] − (T_end / (E_nom · η_d))      · P_reg[k−1] ≥ SOC_min     for k = 1..N
+SOC[k] + (T_end · η_c / E_nom)    · P_reg[k−1]  −  ε_end[k−1] ≤ SOC_max   for k = 1..N
+SOC[k] − (T_end / (E_nom · η_d))  · P_reg[k−1]  +  ε_end[k−1] ≥ SOC_min   for k = 1..N
 ```
+
+`W_end` is set an order of magnitude above `W_term`, so the LP will
+always sacrifice the terminal anchor before sacrificing endurance.
+`W_term` is in turn scaled with `E_nom` (to \$50 per kWh of terminal
+drift), large enough to dominate any plausible diurnal price spread so
+the anchor stays binding under normal forecasts.
 
 **Terminal SOC anchor** (encoded as a linear equality with non-negative
 slacks; the objective penalty `W_term · (z⁺ + z⁻)` then implements the

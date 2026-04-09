@@ -229,7 +229,7 @@ const N = 1;
 const xN = Array.from({length:N},(_,i)=>i+1);
 const p_rule_based = [8.3824];
 const p_deterministic_lp = [54.7278];
-const p_ems_clamps = [54.7462];
+const p_ems = [54.7462];
 const p_economic_mpc = [53.8309];
 const advantage = p_economic_mpc.map((v,i) => +(v - p_rule_based[i]).toFixed(4));
 const adv_sorted = [...advantage].sort((a,b)=>a-b);
@@ -248,7 +248,7 @@ Plotly.newPlot('chart-sorted',[
   margin:{t:40, b:44, l:50, r:16}
 },{responsive:true,displayModeBar:false});
 Plotly.newPlot('chart-cumul',[
-  {x:xN, y:p_rule_based.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Rule-Based', line:{color:'#64748b',width:1.5}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Rule-Based</extra>'},{x:xN, y:p_deterministic_lp.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Commercial LP', line:{color:'#f59e0b',width:1.5}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Commercial LP</extra>'},{x:xN, y:p_ems_clamps.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Stochastic EMS', line:{color:'#8b5cf6',width:1.5}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Stochastic EMS</extra>'},{x:xN, y:p_economic_mpc.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Economic MPC (v5)', fill:'tozeroy', fillcolor:'rgba(59,130,246,0.08)',line:{color:'#3b82f6',width:3}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Economic MPC (v5)</extra>'}
+  {x:xN, y:p_rule_based.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Rule-Based', line:{color:'#64748b',width:1.5}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Rule-Based</extra>'},{x:xN, y:p_deterministic_lp.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Commercial LP', line:{color:'#f59e0b',width:1.5}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Commercial LP</extra>'},{x:xN, y:p_ems.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Stochastic EMS', line:{color:'#8b5cf6',width:1.5}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Stochastic EMS</extra>'},{x:xN, y:p_economic_mpc.reduce((a,v,i)=>{a.push((a[i]||0)+v);return a},[]).slice(0,N), type:'scatter', mode:'lines', name:'Economic MPC (v5)', fill:'tozeroy', fillcolor:'rgba(59,130,246,0.08)',line:{color:'#3b82f6',width:3}, hovertemplate:'Day %{x}: \u20ac%{y:.0f} total<extra>Economic MPC (v5)</extra>'}
 ],{
   ...dark,
   title:{text:'Cumulative profit over Q1 2024 (\u20ac, net of wear)',font:{size:11,color:'#f1f5f9'}},

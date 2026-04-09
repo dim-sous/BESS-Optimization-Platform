@@ -115,17 +115,21 @@ class DeterministicLP:
         soc_init = float(np.clip(soc_init, bp.SOC_min + 1e-3, bp.SOC_max - 1e-3))
 
         # ---- Decision vector layout ----
-        # [P_chg(N), P_dis(N), P_reg(N), z_plus(1), z_minus(1)]
+        # [P_chg(N), P_dis(N), P_reg(N), z_plus(1), z_minus(1), eps_end(N)]
         # z_plus / z_minus are auxiliary nonneg slacks for the L1
         # terminal-SOC anchor:  SOC[N] - SOC_terminal == z_plus - z_minus.
-        # Penalising (z_plus + z_minus) approximates a |·| penalty in
-        # pure LP form (no quadratics — scipy linprog can't do them).
-        n_var = 3 * N + 2
+        # eps_end[k] is a per-step nonneg slack that softens BOTH endurance
+        # bounds at step k (mirrors EconomicEMS's ``eps_endurance`` pattern,
+        # which uses a single slack on both sides). Without it the LP can be
+        # infeasible on edge cases where the EMS would just pay a slack
+        # penalty and continue, biasing the comparison.
+        n_var = 4 * N + 2
         i_chg = slice(0, N)
         i_dis = slice(N, 2 * N)
         i_reg = slice(2 * N, 3 * N)
         i_zp = 3 * N            # z_plus  index
         i_zm = 3 * N + 1        # z_minus index
+        i_end = slice(3 * N + 2, 4 * N + 2)
 
         # Cost coefficients (linprog minimizes c^T x; we maximize profit).
         # Energy + FCR revenue terms (negative cost = positive revenue):
@@ -145,12 +149,25 @@ class DeterministicLP:
         c[i_reg] += deg_unit * bp.alpha_deg_reg
 
         # Terminal SOC anchor: penalise |SOC[N] - SOC_terminal| via L1.
-        # Weight chosen so a 5% terminal drift costs ~$25 — comparable to
-        # the EconomicEMS quadratic terminal_soc_weight = 1e4 evaluated
-        # at the same drift (1e4 * 0.05^2 = $25).
-        TERMINAL_W = 500.0     # $/SOC-unit  (linear)
+        # Marginal cost of drift must dominate any plausible per-kWh
+        # arbitrage edge, otherwise the LP saturates the slack and the
+        # anchor becomes inactive. Scaling by E_nom gives a marginal cost
+        # of $50 per kWh of terminal drift — well above any realistic
+        # diurnal spread, so the anchor stays binding in normal operation
+        # while still being a *soft* constraint that won't infeasible-out.
+        TERMINAL_W = 50.0 * bp.E_nom_kwh   # $/SOC-unit  (linear)
         c[i_zp] = TERMINAL_W
         c[i_zm] = TERMINAL_W
+
+        # Endurance slack penalty. Linear (LP), so it must strictly exceed
+        # any per-step revenue gain from violating endurance — bound that
+        # by P_max * max_price_spread * dt_h. We pick a value an order of
+        # magnitude above TERMINAL_W so endurance is preferred over
+        # terminal anchor when both are tight (matches EMS, where
+        # eps_endurance has a higher weight than terminal_soc_weight at
+        # comparable drifts).
+        ENDURANCE_W = 10.0 * TERMINAL_W
+        c[i_end] = ENDURANCE_W
 
         # ---- Bounds ----
         bounds = (
@@ -158,6 +175,7 @@ class DeterministicLP:
             + [(0.0, bp.P_max_kw)] * N         # P_dis
             + [(0.0, bp.P_max_kw)] * N         # P_reg
             + [(0.0, None)] * 2                # z_plus, z_minus (>= 0)
+            + [(0.0, None)] * N                # eps_end (>= 0)
         )
 
         # ---- Inequality constraints A_ub @ x <= b_ub ----
@@ -173,6 +191,17 @@ class DeterministicLP:
         E_nom = bp.E_nom_kwh
         eta_c = bp.eta_charge
         eta_d = bp.eta_discharge
+
+        # Expected SOC drift per kW of committed P_reg per LP step, matching
+        # the EMS RK4 integrator (build_casadi_dynamics_3state). Symmetric
+        # activation has efficiency loss eta_c - 1/eta_d < 0, so committing
+        # P_reg drains SOC in expectation. Without this term the LP would
+        # under-cost regulation commitment relative to the stochastic EMS
+        # and produce an artificially favourable "commercial baseline."
+        # SOH is not modelled in the LP, so we evaluate at SOH=1 (same
+        # convention used by the LP's SOC recursion above for chg/dis).
+        eta_loss = eta_c - 1.0 / eta_d                       # < 0
+        reg_drift_coef = eta_loss * ep.expected_activation_frac * dt_h / E_nom
 
         # Build cumulative-sum coefficient matrix M_soc[k, j] for k=1..N
         # so that SOC[k] - soc_init = M_soc[k] @ x_chg + M_dis[k] @ x_dis
@@ -207,7 +236,9 @@ class DeterministicLP:
             for j in range(k):
                 row[i_chg.start + j] = +(dt_h / E_nom) * eta_c
                 row[i_dis.start + j] = -(dt_h / E_nom) / eta_d
-            row[i_reg.start + (k - 1)] = +endurance_h * eta_c / E_nom
+                row[i_reg.start + j] = +reg_drift_coef
+            row[i_reg.start + (k - 1)] += +endurance_h * eta_c / E_nom
+            row[i_end.start + (k - 1)] = -1.0   # softens upper bound
             rows_ub.append(row)
             bs_ub.append(bp.SOC_max - soc_init)
 
@@ -216,7 +247,9 @@ class DeterministicLP:
             for j in range(k):
                 row2[i_chg.start + j] = -(dt_h / E_nom) * eta_c
                 row2[i_dis.start + j] = +(dt_h / E_nom) / eta_d
-            row2[i_reg.start + (k - 1)] = +endurance_h / (E_nom * eta_d)
+                row2[i_reg.start + j] = -reg_drift_coef
+            row2[i_reg.start + (k - 1)] += +endurance_h / (E_nom * eta_d)
+            row2[i_end.start + (k - 1)] = -1.0   # softens lower bound
             rows_ub.append(row2)
             bs_ub.append(-(bp.SOC_min - soc_init))
 
@@ -231,6 +264,7 @@ class DeterministicLP:
         for j in range(N):
             eq_row[i_chg.start + j] = +(dt_h / E_nom) * eta_c
             eq_row[i_dis.start + j] = -(dt_h / E_nom) / eta_d
+            eq_row[i_reg.start + j] = +reg_drift_coef
         eq_row[i_zp] = -1.0
         eq_row[i_zm] = +1.0
         A_eq = eq_row.reshape(1, -1)
@@ -261,7 +295,7 @@ class DeterministicLP:
         for k in range(N):
             soc_ref[k + 1] = soc_ref[k] + (dt_h / E_nom) * (
                 eta_c * p_chg_ref[k] - p_dis_ref[k] / eta_d
-            )
+            ) + reg_drift_coef * p_reg_ref[k]
 
         # `expected_profit` is the negated LP objective, which includes the
         # L1 terminal-anchor slack penalty. Used only for the planner's own

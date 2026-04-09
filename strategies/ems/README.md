@@ -1,4 +1,4 @@
-# ems_clamps — Stochastic NLP (EMS)
+# ems — Stochastic NLP (EMS alone)
 
 **Pitch-visible:** yes (canonical "EMS alone" pitch baseline)
 **Composition:** `EconomicEMS` (stochastic NLP planner) + open-loop dispatch (no MPC)
@@ -39,7 +39,7 @@ there is no MPC layer.
 | `ā`                | E[ \|activation\| ]                                    | (= 0.04)         |
 | `T_end`            | endurance horizon                                      | h (= 0.5)        |
 | `κ(T)`             | Arrhenius factor (defined below)                       | —                |
-| `Q_soc_term`,`Q_soh_term` | terminal SOC and SOH penalties                  | (each = 1e4)     |
+| `Q_soc_term`       | terminal SOC penalty                                    | (= 1e4)          |
 | `λ_soc`,`λ_end`    | soft-constraint slack penalties                        | (each = 1e5)     |
 
 ### Decision variables (per scenario s)
@@ -117,7 +117,6 @@ J[s] =   − Σ over k=0..N−1 of [
                              + α_reg ·  P_reg[s,k] )             ← degradation cost
           ]
        +   Q_soc_term · ( SOC[s, N] − SOC_term )²                ← terminal SOC
-       +   Q_soh_term · ( SOH[s, N] − SOH_0    )²                ← terminal SOH
        +   λ_soc · Σ over k=0..N   of  ε_soc[s,k]²
        +   λ_end · Σ over k=0..N−1 of  ε_end[s,k]²
 ```
@@ -149,11 +148,14 @@ P_chg[s,k] + P_reg[s,k]  ≤  P_max
 P_dis[s,k] + P_reg[s,k]  ≤  P_max
 ```
 
-**Endurance (soft):**
+**Endurance (soft):** at the moment we commit `P_reg[s,k]` (i.e.
+starting from `SOC[s,k]`), the pack must have enough headroom to
+sustain the commitment for `T_end` hours of full activation in either
+direction. Real capacity scales with SOH:
 
 ```
-SOC[s, k+1] + (T_end · η_c       / E_nom) · P_reg[s,k]  ≤  SOC_max + ε_end[s,k]
-SOC[s, k+1] − (T_end / (E_nom · η_d))     · P_reg[s,k]  ≥  SOC_min − ε_end[s,k]
+SOC[s, k] + (T_end · η_c       / (SOH[s,k] · E_nom)) · P_reg[s,k]  ≤  SOC_max + ε_end[s,k]
+SOC[s, k] − (T_end / (SOH[s,k] · E_nom · η_d))       · P_reg[s,k]  ≥  SOC_min − ε_end[s,k]
 ```
 
 ### Non-anticipativity (cross-scenario coupling)
@@ -177,11 +179,18 @@ non-anticipativity, the planner would "see" the realised scenario from
 
 - **V_rc transient dynamics** (charge-transfer + diffusion modes). Time
   constants ≤ 400 s ≪ Δt_ems = 3600 s, so they decay within one EMS
-  step.
+  step. The EKF's `vrc1/vrc2` estimates passed to `solve()` are
+  intentionally discarded.
 - **Multi-cell pack effects.** Plans against pack-mean SOC; cell-level
   imbalance is left to the plant's balancer.
 - **Sub-hour activation realisation.** Uses only the expected magnitude
   `ā = 0.04` in the SOC drain term — does not condition on the actual
-  activation sample.
+  activation sample. The expected joule-heating contribution from FCR
+  activation (`ā · |P_reg|`) is also omitted from the thermal dynamics;
+  defensible at hourly resolution but worth knowing.
 - **Closed-loop feedback inside the hour.** The hourly setpoint is held
   open-loop until the next EMS solve.
+- **Strict charge/discharge disjointness.** Both `P_chg` and `P_dis` are
+  non-negative and nothing forbids both being positive simultaneously.
+  A small linear regulariser breaks the tie so the solver doesn't park
+  spurious symmetric pairs.

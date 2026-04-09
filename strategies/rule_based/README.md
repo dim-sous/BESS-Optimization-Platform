@@ -60,19 +60,21 @@ closed-form heuristic over the forecast prices.
     D = { σ[N − n*], σ[N − n* + 1], ..., σ[N − 1] }    # n* most expensive hours
     ```
 
-6. **Profitability gate** — only commit if there is a positive spread:
+6. **Profitability gate** — only commit if every round-trip pair clears
+   round-trip losses on the forecast:
 
     ```
-    if  p_e[ max(D) ]  >  p_e[ max(C) ]:
+    eta_rt = eta_charge * eta_discharge
+    if  min( p_e[D] ) * eta_rt  >  max( p_e[C] ):
         commit
     else:
         idle
     ```
 
-    `max(D)` is the most expensive of the discharge hours;
-    `max(C)` is the *most expensive of the cheap hours* (i.e., the
-    least cheap charge hour). The gate fires only when the highest
-    discharge price exceeds the worst charge price.
+    `min(p_e[D])` is the *cheapest* of the discharge hours and
+    `max(p_e[C])` is the *most expensive* of the charge hours, so the
+    worst pair in the schedule must still beat round-trip losses.
+    Degenerate horizons with `n* == 0` short-circuit to idle.
 
 7. **Output schedule (when committed):**
 

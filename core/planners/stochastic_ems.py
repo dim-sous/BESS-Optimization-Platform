@@ -90,8 +90,8 @@ class EconomicEMS:
         energy_scenarios: np.ndarray,
         reg_scenarios: np.ndarray,
         probabilities: np.ndarray,
-        vrc1_init: float = 0.0,
-        vrc2_init: float = 0.0,
+        vrc1_init: float = 0.0,  # noqa: ARG002 — kept for protocol compat
+        vrc2_init: float = 0.0,  # noqa: ARG002 — kept for protocol compat
     ) -> dict:
         """Solve the stochastic EMS optimisation.
 
@@ -120,10 +120,19 @@ class EconomicEMS:
         N = min(ep.N_ems, energy_scenarios.shape[1])
         S = len(probabilities)
 
-        # Clip initial state to strictly feasible region
+        # Clip initial state to strictly feasible region. Log when the
+        # clip is non-trivial (>1% on SOC, >0.5 degC on T) — that means
+        # the EKF is at the rail and the planner is being fed a lie.
+        soc_raw, soh_raw, t_raw = soc_init, soh_init, t_init
         soc_init = float(np.clip(soc_init, bp.SOC_min + 0.001, bp.SOC_max - 0.001))
         soh_init = float(np.clip(soh_init, 0.51, 1.0))
         t_init = float(np.clip(t_init, thp.T_min + 0.1, thp.T_max - 0.1))
+        if abs(soc_raw - soc_init) > 0.01:
+            logger.warning("EMS init SOC clipped: %.4f -> %.4f", soc_raw, soc_init)
+        if abs(soh_raw - soh_init) > 0.005:
+            logger.warning("EMS init SOH clipped: %.4f -> %.4f", soh_raw, soh_init)
+        if abs(t_raw - t_init) > 0.5:
+            logger.warning("EMS init T clipped: %.2f -> %.2f", t_raw, t_init)
 
         opti = ca.Opti()
 
@@ -185,33 +194,37 @@ class EconomicEMS:
                     + bp.alpha_deg_reg * P_reg[s][k]
                 ) * self.tp.dt_ems
 
-                # Endurance constraint: SOC must have room to sustain
-                # P_reg for endurance_hours at full activation in either direction.
-                # Lower: discharge drains SOC by P_reg*t / (E_nom * eta_d)
-                # Upper: charge fills SOC by P_reg*t * eta_c / E_nom
+                # Endurance constraint: at the moment we COMMIT P_reg for
+                # hour k (i.e. starting from SOC[k]), the pack must have
+                # enough headroom to sustain that commitment for
+                # endurance_hours at full activation in either direction.
+                # Real capacity scales with SOH, so divide by SOH*E_nom.
+                # Lower: discharge drains SOC by P_reg*t / (SOH*E_nom*eta_d)
+                # Upper: charge fills SOC by P_reg*t * eta_c / (SOH*E_nom)
+                cap_kwh = SOH[s][k] * bp.E_nom_kwh
                 margin_low = (
                     P_reg[s][k] * ep.endurance_hours
-                    / (bp.E_nom_kwh * bp.eta_discharge)
+                    / (cap_kwh * bp.eta_discharge)
                 )
                 margin_high = (
                     P_reg[s][k] * ep.endurance_hours
-                    * bp.eta_charge / bp.E_nom_kwh
+                    * bp.eta_charge / cap_kwh
                 )
                 opti.subject_to(
-                    SOC[s][k + 1] >= bp.SOC_min + margin_low - eps_endurance[s][k]
+                    SOC[s][k] >= bp.SOC_min + margin_low - eps_endurance[s][k]
                 )
                 opti.subject_to(
-                    SOC[s][k + 1] <= bp.SOC_max - margin_high + eps_endurance[s][k]
+                    SOC[s][k] <= bp.SOC_max - margin_high + eps_endurance[s][k]
                 )
 
                 scenario_profit += energy_rev + reg_rev - deg_cost
 
-            # Terminal penalties
+            # Terminal SOC penalty. There is no terminal SOH penalty:
+            # anchoring SOH[N] to soh_init is physically wrong (SOH must
+            # decay during operation) and the term is dominated by the
+            # in-step degradation cost anyway. See audit 2026-04-09.
             scenario_profit -= ep.terminal_soc_weight * (
                 SOC[s][N] - bp.SOC_terminal
-            ) ** 2
-            scenario_profit -= ep.terminal_soh_weight * (
-                SOH[s][N] - soh_init
             ) ** 2
 
             # Soft constraint penalties. The 1e5 weight is intentionally
@@ -232,14 +245,21 @@ class EconomicEMS:
                 opti.subject_to(SOC[s][k] <= bp.SOC_max + eps_soc[s][k])
             opti.subject_to(opti.bounded(0.5, SOH[s], 1.001))
             opti.subject_to(opti.bounded(thp.T_min, TEMP[s], thp.T_max))
-            opti.subject_to(opti.bounded(0.0, P_chg[s], bp.P_max_kw))
-            opti.subject_to(opti.bounded(0.0, P_dis[s], bp.P_max_kw))
-            opti.subject_to(opti.bounded(0.0, P_reg[s], bp.P_max_kw))
+            # Non-negativity only — the per-leg upper bound is implied by
+            # the joint power-budget constraints below (since P_reg >= 0).
+            opti.subject_to(P_chg[s] >= 0.0)
+            opti.subject_to(P_dis[s] >= 0.0)
+            opti.subject_to(P_reg[s] >= 0.0)
 
             # Power budget: charge + reg <= P_max,  discharge + reg <= P_max
             for k in range(N):
                 opti.subject_to(P_chg[s][k] + P_reg[s][k] <= bp.P_max_kw)
                 opti.subject_to(P_dis[s][k] + P_reg[s][k] <= bp.P_max_kw)
+                # Disjointness regulariser: tiny linear penalty on the sum
+                # to break ties so the solver doesn't park spurious
+                # symmetric (chg, dis) pairs that inflate the planner's
+                # expected deg cost without changing dispatch.
+                scenario_profit -= 1e-3 * (P_chg[s][k] + P_dis[s][k])
 
             # Accumulate expected cost (minimise negative profit)
             total_obj += float(probabilities[s]) * (-scenario_profit)
@@ -269,6 +289,7 @@ class EconomicEMS:
             "ipopt.sb": "yes",
             "print_time": 0,
             "ipopt.max_iter": 3000,
+            "ipopt.max_cpu_time": 30.0,  # hard wall-time guard; fall back on exceedance
             "ipopt.tol": 1e-6,
             "ipopt.acceptable_tol": 1e-4,
             "ipopt.warm_start_init_point": "yes",
@@ -281,7 +302,9 @@ class EconomicEMS:
             sol = opti.solve()
         except RuntimeError as exc:
             logger.error("EMS solver failed: %s", exc)
-            return self._fallback_result(N, soc_init, soh_init, t_init)
+            return self._fallback_result(
+                N, S, soc_init, soh_init, t_init, probabilities,
+            )
 
         # ---- Extract per-scenario trajectories (Wow Factor 1) ----
         # Shape: (S, N) for powers, (S, N+1) for states.
@@ -305,6 +328,13 @@ class EconomicEMS:
         )
 
         # Probability-weighted averages (backward-compat with non-MPC strategies).
+        # NOTE: only k=0 is operationally meaningful — non-anticipativity ties
+        # the first-stage decisions across scenarios, so the average there is
+        # exact. For k>=1 the scenarios diverge and the averaged trajectory is
+        # NOT a feasible plan that any scenario follows; treat it as an
+        # expected envelope for traces, never as a dispatch reference. The
+        # ems strategy is safe because it re-solves every hour and
+        # only consumes h=0 via Plan.setpoint_at.
         w = np.asarray(probabilities, dtype=float)
         p_chg_ref = (w[:, None] * scenarios_p_chg).sum(axis=0)
         p_dis_ref = (w[:, None] * scenarios_p_dis).sum(axis=0)
@@ -354,17 +384,40 @@ class EconomicEMS:
 
     @staticmethod
     def _fallback_result(
-        N: int, soc_init: float, soh_init: float, t_init: float,
+        N: int,
+        S: int,
+        soc_init: float,
+        soh_init: float,
+        t_init: float,
+        probabilities: np.ndarray,
     ) -> dict:
-        """Return zero-power references when the solver fails."""
+        """Return zero-power references when the solver fails.
+
+        Populates the per-scenario keys (broadcast of the mean trace) so
+        downstream consumers — Plan.from_planner_dict, the wow-factor
+        scenario fan visualization — don't silently lose their inputs.
+        Sets ``solver_failed=True`` so callers can annotate.
+        """
+        zeros_N = np.zeros(N)
+        soc_flat = np.full(N + 1, soc_init)
+        soh_flat = np.full(N + 1, soh_init)
+        t_flat   = np.full(N + 1, t_init)
         return {
-            "P_chg_ref": np.zeros(N),
-            "P_dis_ref": np.zeros(N),
-            "P_reg_ref": np.zeros(N),
-            "SOC_ref": np.full(N + 1, soc_init),
-            "SOH_ref": np.full(N + 1, soh_init),
-            "TEMP_ref": np.full(N + 1, t_init),
+            "P_chg_ref": zeros_N,
+            "P_dis_ref": zeros_N,
+            "P_reg_ref": zeros_N,
+            "SOC_ref": soc_flat,
+            "SOH_ref": soh_flat,
+            "TEMP_ref": t_flat,
             "VRC1_ref": np.zeros(N + 1),
             "VRC2_ref": np.zeros(N + 1),
             "expected_profit": 0.0,
+            "scenarios_p_chg": np.broadcast_to(zeros_N, (S, N)).copy(),
+            "scenarios_p_dis": np.broadcast_to(zeros_N, (S, N)).copy(),
+            "scenarios_p_reg": np.broadcast_to(zeros_N, (S, N)).copy(),
+            "scenarios_soc":   np.broadcast_to(soc_flat, (S, N + 1)).copy(),
+            "scenarios_soh":   np.broadcast_to(soh_flat, (S, N + 1)).copy(),
+            "scenarios_temp":  np.broadcast_to(t_flat,   (S, N + 1)).copy(),
+            "probabilities":   np.asarray(probabilities, dtype=float),
+            "solver_failed":   True,
         }
