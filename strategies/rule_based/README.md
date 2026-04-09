@@ -1,29 +1,76 @@
-# rule_based
+# rule_based — heuristic dispatch (NOT an OCP)
 
-**Pitch-visible:** yes
-**Composition:** `RuleBasedPlanner` (no MPC, no PI)
+**Pitch-visible:** yes (strict lower bound)
+**Composition:** `RuleBasedPlanner` (no MPC)
 
-## What it does
+## What it does (plain words)
 
 Sorts the day's forecast-mean energy prices, charges during the cheapest
-hours and discharges during the most expensive. No FCR commitment, no
-optimisation, no closed-loop control. The execution layer applies activation
-modulation in an open-loop way (which is a no-op here since `P_reg = 0`).
+hours, and discharges during the most expensive. No FCR commitment. No
+optimization problem is solved at all — this is a fixed decision rule
+applied to the price array. Strict lower bound for the comparison
+harness; every other strategy should beat it by a wide margin.
 
-## Why it exists
+## Decision rule (NOT an OCP)
 
-Strict lower bound for the comparison harness. Demonstrates what a buyer
-would get from a basic in-house dispatcher with zero optimisation and no
-participation in frequency regulation markets. Every other strategy should
-beat it by a wide margin — that's the whole point.
+This strategy does not solve an optimization problem. It executes a
+closed-form heuristic over the forecast prices.
 
-## Information visibility
+### Notation
 
-- **Sees**: probability-weighted mean of the forecast scenarios
-- **Does not see**: realized prices (held out for accounting only)
+| Symbol | Meaning | Units |
+|---|---|---|
+| $N$ | planning horizon | hours (= 24) |
+| $\bar{p}^e \in \mathbb{R}^N$ | probability-weighted mean of forecast energy prices | \$/kWh |
+| $E_{\text{nom}}$ | nominal energy capacity | kWh |
+| $\text{SOC}_{\min}, \text{SOC}_{\max}$ | SOC bounds | — |
+| $P_{\max}$ | max charge / discharge power | kW |
 
-## Tunable parameters
+### Algorithm
 
-- Schedule sized to the battery's usable energy capacity
-- Charges/discharges at `0.8 * P_max_kw`
-- Active for `n_hours_needed = ceil(usable_kwh / power)` hours per direction
+1. **Forecast collapse:** $\bar{p}^e_k = \sum_s \pi_s \, p^e_{s,k}$ for each hour $k$.
+
+2. **Compute usable energy and dispatch power:**
+
+$$
+E_{\text{use}} = (\text{SOC}_{\max} - \text{SOC}_{\min}) \, E_{\text{nom}}, \qquad P = 0.8 \, P_{\max}
+$$
+
+3. **Number of active hours per direction:**
+
+$$
+n^* = \min\!\Big( \big\lceil E_{\text{use}} / P \big\rceil, \, \big\lfloor N/3 \big\rfloor \Big)
+$$
+
+4. **Sort hours by ascending forecast price:** $\sigma = \operatorname{argsort}(\bar{p}^e)$.
+
+5. **Pick the $n^*$ cheapest hours as charge hours, the $n^*$ most expensive as discharge hours:**
+
+$$
+\mathcal{C} = \{\sigma_0, \dots, \sigma_{n^*-1}\}, \qquad \mathcal{D} = \{\sigma_{N-n^*}, \dots, \sigma_{N-1}\}
+$$
+
+6. **Profitability gate** — only commit if there is a positive spread:
+
+$$
+\bar{p}^e_{\max(\mathcal{D})} > \bar{p}^e_{\max(\mathcal{C})}
+$$
+
+7. **Output schedule:**
+
+$$
+P_{\text{chg},k} = \begin{cases} P & \text{if gate true and } k \in \mathcal{C} \\ 0 & \text{otherwise} \end{cases}, \quad
+P_{\text{dis},k} = \begin{cases} P & \text{if gate true and } k \in \mathcal{D} \\ 0 & \text{otherwise} \end{cases}
+$$
+
+$$
+P_{\text{reg},k} = 0 \quad \forall k
+$$
+
+### What this does NOT model
+
+- **No optimization.** Greedy price-sorting only.
+- **No state evolution.** SOC is not tracked by the rule itself.
+- **No FCR participation.** $P_{\text{reg}} \equiv 0$.
+- **No constraints.** SOC bounds are honored only by the magic factor `0.8` and the `n_hours_needed` heuristic; the plant clips anything that would violate physics.
+- **No closed-loop feedback.** Single hourly setpoint, dispatched open-loop.
