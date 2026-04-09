@@ -460,13 +460,20 @@ def _print_big_summary(agg: dict, subsets: list[dict], strat_names: list[str]) -
     print()
 
 
-def _run_big_experiment(n_days_per_subset: int) -> None:
+def _run_big_experiment(n_days_per_subset: int, bare_plant: bool = False) -> None:
     """Run the 3-subset x 5-strategy big experiment.
 
     Subsets:
       - calm:     N lowest intraday-spread days, sigma_mhz_mult = 1.0
       - volatile: N highest intraday-spread days, sigma_mhz_mult = 1.0
       - stressed: same N calm days, sigma_mhz_mult = 2.0  (activation stress)
+
+    If ``bare_plant`` is True, the simulator uses a single-cell BatteryPlant
+    instead of the multi-cell BatteryPack. This isolates pure optimizer
+    quality + closed-loop benefit from any robustness-to-cell-imbalance
+    effect (Test 2 vs Test 3 in the audit framework). Output JSON and
+    trace dir are routed to distinct paths so the two configurations
+    do not overwrite each other.
     """
     bp = BatteryParams()
     tp = TimeParams()
@@ -475,7 +482,8 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
     ekf_p = EKFParams()
     thp = ThermalParams()
     elp = ElectricalParams()
-    pp = PackParams()
+    pp = None if bare_plant else PackParams()
+    plant_tag = "bare" if bare_plant else "pack"
     reg_p_nominal = RegulationParams()                                # sigma_mhz_mult=1.0
     reg_p_stressed = RegulationParams(sigma_mhz_mult=2.0)              # 2x activation stress
 
@@ -508,8 +516,9 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
         },
     ]
 
-    # Trace dir for raw npz files
-    trace_dir = RESULTS_DIR / "v5_big_traces"
+    # Trace dir for raw npz files (per-plant-config so the two configs
+    # do not overwrite each other).
+    trace_dir = RESULTS_DIR / f"v5_big_traces_{plant_tag}"
     trace_dir.mkdir(parents=True, exist_ok=True)
 
     # ----- Build flat job list -----
@@ -536,6 +545,7 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
     print("  V5 BIG EXPERIMENT — Real German Market Data, 3 subsets x 5 strategies")
     print("=" * 110)
     print(f"  Battery:    {bp.E_nom_kwh:.0f} kWh / {bp.P_max_kw:.0f} kW")
+    print(f"  Plant:      {'BatteryPlant (single-cell, no manufacturing variation)' if bare_plant else 'BatteryPack (multi-cell, with manufacturing variation)'}")
     print(f"  Subsets:    {[s['id'] for s in subsets]}")
     print(f"  Days/subset:{n_days_per_subset}")
     print(f"  Strategies: {len(strat_names)}")
@@ -618,7 +628,8 @@ def _run_big_experiment(n_days_per_subset: int) -> None:
         ],
     }
 
-    out_path = RESULTS_DIR / "v5_big_experiment.json"
+    out_payload["meta"]["plant"] = plant_tag
+    out_path = RESULTS_DIR / f"v5_big_experiment_{plant_tag}.json"
     with open(out_path, "w") as f:
         json.dump(out_payload, f, indent=2, default=float)
     print(f"\n  Saved: {out_path}  ({out_path.stat().st_size / 1024:.0f} KB)")
@@ -784,10 +795,15 @@ def main() -> None:
         "--big-n", type=int, default=5,
         help="Days per subset for --big (default 5).",
     )
+    parser.add_argument(
+        "--bare-plant", action="store_true",
+        help="Use single-cell BatteryPlant instead of multi-cell BatteryPack. "
+             "Isolates pure optimizer quality from cell-imbalance robustness.",
+    )
     args = parser.parse_args()
 
     if args.big:
-        _run_big_experiment(args.big_n)
+        _run_big_experiment(args.big_n, bare_plant=args.bare_plant)
         return
 
     if args.strategies is not None:
@@ -820,7 +836,7 @@ def main() -> None:
     ekf_p = EKFParams()
     thp = ThermalParams()
     elp = ElectricalParams()
-    pp = PackParams()
+    pp = None if args.bare_plant else PackParams()
     reg_p = RegulationParams()
 
     # Load real prices
