@@ -134,8 +134,17 @@ class RealPriceLoader:
             Actual day_idx FCR-capacity prices (held out, accounting only).
         """
         # --- Realized day (held out) ---
+        # Energy prices pass through unchanged INCLUDING negative hours.
+        # Negative day-ahead clearing prices are real EU market reality
+        # (~5 % of German hours in 2024) and they are exactly the hours
+        # where battery arbitrage is most valuable — the market pays you
+        # to charge. Every downstream solver (LP, EMS, EconomicMPC) and
+        # the ledger handle negative energy prices correctly.
+        # FCR capacity prices are clamped to >= 0; SMARD historically
+        # never clears negative for capacity payments and the revenue
+        # model assumes commitment payments are non-negative.
         actual_e48, actual_r48 = self._build_48h(day_idx)
-        realized_e = np.maximum(actual_e48[:n_hours], 0.001)
+        realized_e = actual_e48[:n_hours].copy()
         realized_r = np.maximum(actual_r48[:n_hours], 0.0)
 
         # --- Forecast scenarios: sample N OTHER historical days ---
@@ -158,7 +167,8 @@ class RealPriceLoader:
             forecast_e[s_idx, :n_hours] = alt_e48[:n_hours]
             forecast_r[s_idx, :n_hours] = alt_r48[:n_hours]
 
-        forecast_e = np.maximum(forecast_e, 0.001)
+        # Energy forecasts pass through unchanged (see realized note above);
+        # reg forecasts clamped to >= 0.
         forecast_r = np.maximum(forecast_r, 0.0)
 
         # --- Equal probabilities (no scenario privileged) ---

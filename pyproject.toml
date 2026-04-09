@@ -9,3 +9,12 @@ dependencies = [
     "matplotlib>=3.7.0",
     "scipy>=1.10.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
