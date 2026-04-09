@@ -24,19 +24,23 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # USD -> EUR conversion
 USD_TO_EUR = 1.0 / 1.08
 
-# Strategy display order and styling
-STRAT_ORDER = ["rule_based", "ems_clamps", "ems_pi", "full"]
+# Strategy display order and styling. Matches the four pitch-visible
+# strategies on current HEAD; the 2026-04-15 cleanup deleted ems_pi and
+# the legacy "full" tracking-MPC variant, and the post-audit comparison
+# uses deterministic_lp as the commercial baseline and economic_mpc as
+# the production v5 strategy.
+STRAT_ORDER = ["rule_based", "deterministic_lp", "ems_clamps", "economic_mpc"]
 STRAT_LABELS = {
     "rule_based": "Rule-Based",
-    "ems_clamps": "Industry Standard",
-    "ems_pi": "Advanced PI",
-    "full": "Full Optimizer",
+    "deterministic_lp": "Commercial LP",
+    "ems_clamps": "Stochastic EMS",
+    "economic_mpc": "Economic MPC (v5)",
 }
 STRAT_COLORS = {
     "rule_based": "#64748b",
-    "ems_clamps": "#f59e0b",
-    "ems_pi": "#8b5cf6",
-    "full": "#3b82f6",
+    "deterministic_lp": "#f59e0b",
+    "ems_clamps": "#8b5cf6",
+    "economic_mpc": "#3b82f6",
 }
 
 
@@ -85,7 +89,7 @@ def pick_representative_day(data: dict) -> int:
     best_idx = 0
     best_spread = -float("inf")
     for day in per_day:
-        spread = day["full"]["total_profit"] - day["rule_based"]["total_profit"]
+        spread = day["economic_mpc"]["total_profit"] - day["rule_based"]["total_profit"]
         if spread > best_spread:
             best_spread = spread
             best_idx = day["day_idx"]
@@ -242,7 +246,7 @@ def slide_real_day(data: dict) -> str:
     # Pick a representative day and pull its summary stats
     day_idx = pick_representative_day(data)
     day_data = data["per_day"][day_idx]
-    net_profit_eur = usd_to_eur(day_data["full"]["total_profit"])
+    net_profit_eur = usd_to_eur(day_data["economic_mpc"]["total_profit"])
 
     return f"""\
 <section class="S">
@@ -259,7 +263,7 @@ def slide_validation(data: dict) -> str:
     """Slide 5: 84-Day Validation — sorted daily advantage + cumulative profit."""
     n_days = data["meta"]["n_days"]
     strats = data["strategies"]
-    full = strats["full"]
+    full = strats["economic_mpc"]
     rb = strats["rule_based"]
 
     full_loss = full.get("loss_days", 0)
@@ -334,7 +338,7 @@ def slide_strategy_table(data: dict) -> str:
             if negate:
                 val = -val
             eur_str = fmt_eur_html(val)
-            is_full = s == "full"
+            is_full = s == "economic_mpc"
             if bold and is_full:
                 cells += f'<td style="text-align:center"><span class="tg g">{eur_str}</span></td>'
             else:
@@ -377,7 +381,7 @@ def slide_strategy_table(data: dict) -> str:
     rows += f"<tr><td>Loss Days</td>{cells}</tr>"
 
     # Highlight full optimizer advantage
-    full_p = usd_to_eur(strats["full"]["total_profit"])
+    full_p = usd_to_eur(strats["economic_mpc"]["total_profit"])
     ind_p = usd_to_eur(strats["ems_clamps"]["total_profit"])
     advantage = full_p - ind_p
     annual_10mwh = advantage * 365 * 50  # 10 MWh = 50x the 200 kWh unit
@@ -391,7 +395,7 @@ def slide_strategy_table(data: dict) -> str:
     <thead><tr><th>Metric</th>{headers}</tr></thead>
     <tbody>{rows}</tbody>
   </table>
-  <div class="hl gr" style="margin-top:20px"><div style="display:flex;align-items:center;gap:14px"><div style="font-size:24px">&#x1F4B0;</div><div style="font-size:13px;color:var(--t2);line-height:1.6"><strong style="color:var(--green)">Full Optimizer advantage over Industry Standard: &euro;{advantage:.2f}/day</strong> &mdash; annualized on a 10 MWh system: <strong>&euro;{annual_10mwh:,.0f}/year</strong></div></div></div>
+  <div class="hl gr" style="margin-top:20px"><div style="display:flex;align-items:center;gap:14px"><div style="font-size:24px">&#x1F4B0;</div><div style="font-size:13px;color:var(--t2);line-height:1.6"><strong style="color:var(--green)">Economic MPC advantage over Stochastic EMS: &euro;{advantage:.2f}/day</strong> &mdash; annualized on a 10 MWh system: <strong>&euro;{annual_10mwh:,.0f}/year</strong></div></div></div>
   <div class="ft">Arpedon &middot; Confidential</div><div class="sn">06</div>
 </section>"""
 
@@ -403,7 +407,7 @@ def slide_economics(data: dict) -> str:
     e_nom = data["meta"]["E_nom_kwh"]
 
     # Daily net profit per 200 kWh (full optimizer), in EUR
-    daily_eur = usd_to_eur(strats["full"]["total_profit"])
+    daily_eur = usd_to_eur(strats["economic_mpc"]["total_profit"])
     # Annualize (daily mean * 365)
     annual_per_unit = daily_eur * 365
 
@@ -416,7 +420,7 @@ def slide_economics(data: dict) -> str:
     rev_10 = annual_per_unit * scale_10mwh
     rev_50 = annual_per_unit * scale_50mwh
 
-    soh_annual = strats["full"]["soh_degradation"] / n_days * 365 * 100
+    soh_annual = strats["economic_mpc"]["soh_degradation"] / n_days * 365 * 100
 
     return f"""\
 <section class="S">
@@ -437,7 +441,7 @@ def slide_reliability(data: dict) -> str:
     """Slide 8: Reliability — checklist + KPI boxes."""
     strats = data["strategies"]
     n_days = data["meta"]["n_days"]
-    full = strats["full"]
+    full = strats["economic_mpc"]
     delivery_pct = full["delivery_score"] * 100
 
     # Total MPC decisions: n_days * (24h * 60min / dt_mpc_s)
@@ -478,7 +482,7 @@ def slide_closing(data: dict) -> str:
     strats = data["strategies"]
     n_days = data["meta"]["n_days"]
     e_nom = data["meta"]["E_nom_kwh"]
-    full = strats["full"]
+    full = strats["economic_mpc"]
 
     daily_eur = usd_to_eur(full["total_profit"])
     profitable_days = n_days - full.get("loss_days", 0)
@@ -520,7 +524,7 @@ def build_chart_scripts(data: dict) -> str:
         daily_eur[s] = [round(v * USD_TO_EUR, 4) for v in daily_profits[s]]
 
     rb_soh_annual = strats["rule_based"]["soh_degradation"] / n_days * 365 * 100
-    full_soh_annual = strats["full"]["soh_degradation"] / n_days * 365 * 100
+    full_soh_annual = strats["economic_mpc"]["soh_degradation"] / n_days * 365 * 100
 
     lines: list[str] = []
     lines.append("const dark = {paper_bgcolor:'#111827', plot_bgcolor:'#111827', "
@@ -534,7 +538,7 @@ def build_chart_scripts(data: dict) -> str:
 
     # ── Chart: Sorted advantage (Full vs Rule-Based) ──
     lines.append("""\
-const advantage = p_full.map((v,i) => +(v - p_rule_based[i]).toFixed(4));
+const advantage = p_economic_mpc.map((v,i) => +(v - p_rule_based[i]).toFixed(4));
 const adv_sorted = [...advantage].sort((a,b)=>a-b);
 const adv_colors = adv_sorted.map(v => v >= 0 ? '#10b981' : '#ef4444');
 Plotly.newPlot('chart-sorted',[
@@ -551,17 +555,18 @@ Plotly.newPlot('chart-sorted',[
   margin:{t:40, b:44, l:50, r:16}
 },{responsive:true,displayModeBar:false});""")
 
-    # ── Chart: Cumulative profit (all 4 strategies) ──
+    # ── Chart: Cumulative profit (all 4 pitch-visible strategies) ──
+    # Driven from STRAT_ORDER / STRAT_LABELS / STRAT_COLORS so the chart
+    # tracks the constants block above. The economic_mpc series is the
+    # highlighted one (filled, thicker line).
     strat_configs = [
-        ("p_rule_based", "Rule-Based", "#64748b", 1.5),
-        ("p_ems_clamps", "Industry Standard", "#f59e0b", 1.5),
-        ("p_ems_pi", "Advanced PI", "#8b5cf6", 1.5),
-        ("p_full", "Full Optimizer", "#3b82f6", 3),
+        (f"p_{s}", STRAT_LABELS[s], STRAT_COLORS[s], 3 if s == "economic_mpc" else 1.5)
+        for s in STRAT_ORDER
     ]
     traces = []
     for var, label, color, width in strat_configs:
         fill_part = ""
-        if var == "p_full":
+        if var == "p_economic_mpc":
             fill_part = "fill:'tozeroy', fillcolor:'rgba(59,130,246,0.08)',"
         traces.append(
             f"{{x:xN, y:{var}.reduce((a,v,i)=>{{a.push((a[i]||0)+v);return a}},[]).slice(0,N), "
@@ -596,7 +601,7 @@ const sparkLayout = {
 Plotly.newPlot('spark-loss',[
   {x:xN, y:p_rule_based.map(v=>Math.min(v,0)), type:'bar',
    marker:{color:'#ef4444'}, width:1.2},
-  {x:xN, y:p_full.map(v=>Math.max(v,0)), type:'bar',
+  {x:xN, y:p_economic_mpc.map(v=>Math.max(v,0)), type:'bar',
    marker:{color:'rgba(16,185,129,0.3)'}, width:1.2}
 ],{...sparkLayout, barmode:'overlay',
    yaxis:{visible:false, zeroline:true, zerolinecolor:'#374151', zerolinewidth:1}},
@@ -715,7 +720,7 @@ def print_summary(data: dict) -> None:
     strats = data["strategies"]
     n_days = data["meta"]["n_days"]
     e_nom = data["meta"]["E_nom_kwh"]
-    full = strats["full"]
+    full = strats["economic_mpc"]
     rb = strats["rule_based"]
 
     daily_eur = usd_to_eur(full["total_profit"])
@@ -731,7 +736,7 @@ def print_summary(data: dict) -> None:
     print(f"  Simulation days:  {n_days}")
     print(f"  System size:      {e_nom:.0f} kWh / {data['meta']['P_max_kw']:.0f} kW")
     print("-" * 60)
-    print(f"  Full Optimizer daily profit:   {fmt_eur(full['total_profit'])}")
+    print(f"  Economic MPC daily profit:     {fmt_eur(full['total_profit'])}")
     print(f"  Rule-Based daily profit:       {fmt_eur(rb['total_profit'])}")
     print(f"  Daily advantage:               +{fmt_eur(full['total_profit'] - rb['total_profit'])}")
     print(f"  Profitable days:               {n_days - full.get('loss_days', 0)} / {n_days}")

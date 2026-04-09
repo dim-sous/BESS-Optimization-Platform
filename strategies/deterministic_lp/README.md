@@ -11,9 +11,10 @@ SOC anchor, and the same degradation cost as the stochastic EMS — so the
 LP and stochastic EMS optimise the same physical objective and the
 comparison is apples-to-apples.
 
-The LP outputs hourly setpoints that the simulator dispatches open-loop
-(no PI feedback), with activation modulation applied directly. This
-matches how most commercial BESS EMS products actually operate.
+The LP outputs hourly setpoints that the simulator dispatches open-loop.
+Activation tracking lives inside the plant (post-RF1), so the FCR signal
+is served against the held LP setpoint with no strategy-layer feedback.
+This matches how most commercial BESS EMS products actually operate.
 
 ## Why it exists
 
