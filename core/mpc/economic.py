@@ -1,31 +1,24 @@
 """Economic MPC.
 
-v5_regulation_activation, Step 3.
+Profit-maximising NLP with a soft terminal SOC anchor against the EMS
+plan. The MPC sees forecast prices (probability-weighted forecast mean,
+never realized) and trades arbitrage profit against degradation cost.
 
-**Economic objective** with soft EMS anchor instead of hard reference
-tracking. MPC sees forecast prices (energy + FCR capacity, both as
-probability-weighted forecast means — never the realized prices) and
-trades arbitrage profit against degradation and a soft penalty on
-deviating from the EMS SOC plan.
+Design points:
 
-RF1 (2026-04-15): the previous "activation-aware OU persistence
-forecast" was removed. It used the latest ground-truth activation
-sample, which is a cheat — on real hardware the MPC cannot see the
-grid signal at sub-minute granularity. The activation signal lives
-inside the plant now (it *is* the BESS controller). MPC plans SOC
-as if activation will take its expected value (zero signed mean),
-which is correct given that the OU activation process is symmetric
-around zero. The MPC's edge over LP/EMS comes from re-planning
-against the live EKF state estimate, not from peeking at the grid.
-
-P_reg is treated as **exogenous** (parameter, not decision variable).
-The simulator passes ``P_reg_committed`` from the EMS hourly plan,
-ZOH-expanded across the MPC horizon, since in execution the PI
-controller dispatches the EMS-committed reg power, not the MPC's
-choice. This eliminates a redundant decision variable and makes the
-MPC's job clear: "given that the EMS committed P_reg, plan chg/dis to
-keep the SOC trajectory feasible under the expected activation
-realisation, while squeezing whatever arbitrage value is available."
+- ``P_reg`` is exogenous (parameter, not decision variable). The
+  simulator passes the EMS-committed reg power ZOH-expanded across the
+  horizon; the MPC plans `P_chg`/`P_dis` to keep SOC feasible under
+  that commitment.
+- The MPC plans expected signed activation = 0 (the OU activation
+  process is symmetric around zero), so there is no SOC pre-positioning
+  term and no expected delivery payment in the cost (constant w.r.t.
+  the decision variables).
+- No per-step SOC anchor — the EMS pins end-of-hour SOC, not an in-hour
+  trajectory. Cross-hour alignment is handled exclusively by the
+  terminal anchor `Q_terminal_econ · (SOC[N] − soc_ref[N])²`.
+- Solver-failure fallback: a `TrackingMPC` instance, so the EMS plan is
+  never lost.
 """
 
 from __future__ import annotations
@@ -40,17 +33,17 @@ from core.config.parameters import (
     ElectricalParams,
     EMSParams,
     MPCParams,
-    RegulationParams,
     ThermalParams,
     TimeParams,
 )
+from core.mpc._common import ipopt_opts, pad_to
 from core.mpc.tracking import TrackingMPC, _build_2state_integrator
 
 logger = logging.getLogger(__name__)
 
 
 class EconomicMPC:
-    """Profit-maximising MPC with soft EMS anchor (v5 Step 3)."""
+    """Profit-maximising MPC with terminal EMS-anchor."""
 
     def __init__(
         self,
@@ -60,7 +53,6 @@ class EconomicMPC:
         thp: ThermalParams,
         elp: ElectricalParams,
         ep: EMSParams,
-        reg_p: RegulationParams,
     ) -> None:
         self.bp = bp
         self.tp = tp
@@ -68,19 +60,18 @@ class EconomicMPC:
         self.thp = thp
         self.elp = elp
         self.ep = ep
-        self.reg_p = reg_p
 
         self.last_solve_failed = False
+        self._clip_warned = False  # one-shot warn when EKF SOC is out-of-bounds
 
         # Warm-start caches
         self._prev_P_chg: np.ndarray | None = None
         self._prev_P_dis: np.ndarray | None = None
-        self._prev_P_reg: np.ndarray | None = None
         self._prev_SOC: np.ndarray | None = None
         self._prev_TEMP: np.ndarray | None = None
 
-        # Fallback: if the economic NLP fails, fall back to a tracking MPC
-        # solve so we never lose the EMS plan. Built lazily.
+        # Fallback: if the economic NLP fails, fall back to a tracking
+        # MPC solve so we never lose the EMS plan.
         self._tracking_fallback = TrackingMPC(bp, tp, mp, thp, elp)
 
         self._build_problem()
@@ -95,15 +86,11 @@ class EconomicMPC:
         bp = self.bp
         mp = self.mp
         thp = self.thp
-        reg_p = self.reg_p
         ep = self.ep
 
         opti = ca.Opti()
 
-        # ---- Decision variables ----
-        # Note: P_reg is NO LONGER a decision variable. It's set hourly by
-        # the EMS and the PI controller dispatches it directly. The MPC
-        # plans P_chg/P_dis to keep SOC feasible under the EMS reg plan.
+        # ---- Decision variables (P_reg is exogenous, not optimised) ----
         P_chg = opti.variable(Nc)
         P_dis = opti.variable(Nc)
         SOC = opti.variable(N + 1)
@@ -115,40 +102,29 @@ class EconomicMPC:
         soc_0 = opti.parameter()
         soh_p = opti.parameter()
         temp_0 = opti.parameter()
-        soc_ref_p = opti.parameter(N + 1)             # EMS anchor (cross-hour SOC)
+        soc_ref_p = opti.parameter(N + 1)             # only soc_ref_p[N] enters cost
         u_prev_p = opti.parameter(2)                  # last [P_chg, P_dis]
         price_e_p = opti.parameter(N)                 # forecast $/kWh per step
-        # P_reg committed by EMS, ZOH per MPC step (already exogenous)
-        p_reg_committed_p = opti.parameter(N)
+        p_reg_committed_p = opti.parameter(N)         # ZOH from EMS plan, magnitude ≥0
 
         # ---- 2-state integrator with SOH parameter ----
         F_mpc = _build_2state_integrator(
             bp, thp, self.elp, self.tp.dt_mpc, soh_p,
         )
 
-        # Initial conditions
         opti.subject_to(SOC[0] == soc_0)
         opti.subject_to(TEMP[0] == temp_0)
 
-        dt_h = self.tp.dt_mpc / 3600.0          # hours per MPC step
-        dt_s = self.tp.dt_mpc                    # seconds per MPC step
+        dt_h = self.tp.dt_mpc / 3600.0
+        dt_s = self.tp.dt_mpc
 
         cost = 0.0
 
         for k in range(N):
             j = min(k, Nc - 1)   # control horizon blocking
 
-            # RF1 (2026-04-15): the activation-aware OU forecast was
-            # removed. The expected signed activation over the horizon
-            # is zero (symmetric OU process around zero), so there is
-            # no SOC pre-positioning term. The expected delivery
-            # payment is constant w.r.t. the decision variables
-            # (P_reg is exogenous) and has also been dropped from the
-            # cost — it cannot influence the optimum.
-
-            # ---- Prediction model inputs ----
             # Reg input is the absolute committed reg power so thermal
-            # Joule heating is correctly accounted.
+            # Joule heating is correctly accounted in the prediction.
             u_k_eff = ca.vertcat(P_chg[j], P_dis[j], p_reg_committed_p[k])
 
             x2_k = ca.vertcat(SOC[k], TEMP[k])
@@ -156,20 +132,19 @@ class EconomicMPC:
             opti.subject_to(SOC[k + 1] == x2_next[0])
             opti.subject_to(TEMP[k + 1] == x2_next[1])
 
-            # ---- Cost terms (cost = -profit on the planning variables) ----
             # Energy arbitrage profit (negative cost = profit)
-            cost += -mp.w_e * price_e_p[k] * (P_dis[j] - P_chg[j]) * dt_h
+            cost += -price_e_p[k] * (P_dis[j] - P_chg[j]) * dt_h
 
-            # Degradation cost on the planned-action chg/dis only
-            # (split form matches plant/EMS/accounting). Reg-power
+            # Degradation cost on planned chg/dis throughput. Reg-power
             # degradation is constant w.r.t. our decision variables and
-            # is omitted from optimization (added to value report by the
-            # simulator).
+            # is omitted from the optimization (the simulator's value
+            # report still accounts for it).
             P_arb = P_chg[j] + P_dis[j]
-            cost += mp.w_deg * ep.degradation_cost * bp.alpha_deg * P_arb * dt_s
+            cost += ep.degradation_cost * bp.alpha_deg * P_arb * dt_s
 
-            # Soft EMS anchor: keep planned SOC near EMS strategic plan
-            cost += mp.Q_soc_anchor * (SOC[k] - soc_ref_p[k]) ** 2
+            # NO per-step SOC anchor. Intra-hour SOC trajectory is fiction
+            # (the EMS pins end-of-hour SOC only). Cross-hour alignment
+            # falls entirely on the terminal anchor below.
 
             # Rate-of-change penalty (smoothness)
             if k == 0:
@@ -194,10 +169,6 @@ class EconomicMPC:
         opti.minimize(cost)
 
         # ---- Constraints ----
-        # Power bounds: P_chg / P_dis are decision variables and bounded
-        # by the headroom available after subtracting the committed reg
-        # capacity. Use the maximum reg over the horizon for a tight,
-        # static bound (conservative but simple).
         opti.subject_to(opti.bounded(0.0, P_chg, bp.P_max_kw))
         opti.subject_to(opti.bounded(0.0, P_dis, bp.P_max_kw))
         opti.subject_to(eps >= 0)
@@ -211,36 +182,17 @@ class EconomicMPC:
 
         # Power-budget headroom: planned chg/dis must leave room for the
         # committed reg power at the corresponding horizon step. Enforced
-        # over the FULL prediction horizon (not just the unblocked control
-        # window) — the EMS-committed P_reg can change cross-hour inside
-        # the horizon, and the held control values must stay feasible
-        # against those later commitments. Otherwise the MPC's predicted
-        # SOC trajectory propagates a physically infeasible plan in the
-        # blocked region.
+        # over the FULL prediction horizon so the blocked control region
+        # cannot propagate a physically infeasible plan.
+        # NOTE: assumes p_reg_committed_p ≥ 0 (magnitude of symmetric FCR
+        # capacity). If reg ever becomes signed/directional, replace with
+        # ca.fabs(p_reg_committed_p[k]).
         for k in range(N):
             j = min(k, Nc - 1)
             opti.subject_to(P_chg[j] + p_reg_committed_p[k] <= bp.P_max_kw)
             opti.subject_to(P_dis[j] + p_reg_committed_p[k] <= bp.P_max_kw)
 
-        # ---- Solver options (identical to TrackingMPC, including JIT) ----
-        opts = {
-            "ipopt.print_level": 0,
-            "ipopt.sb": "yes",
-            "print_time": 0,
-            "ipopt.max_iter": 500,
-            "ipopt.tol": 1e-6,
-            "ipopt.acceptable_tol": 1e-4,
-            "ipopt.warm_start_init_point": "yes",
-            "ipopt.mu_init": 1e-3,
-        }
-        import os as _os
-        if _os.environ.get("BESS_JIT", "1") != "0":
-            opts.update({
-                "jit": True,
-                "compiler": "shell",
-                "jit_options": {"flags": ["-O3", "-march=native"], "verbose": False},
-            })
-        opti.solver("ipopt", opts)
+        opti.solver("ipopt", ipopt_opts())
 
         # ---- Store handles ----
         self._opti = opti
@@ -268,7 +220,6 @@ class EconomicMPC:
         soc_ref: np.ndarray,
         p_chg_ref: np.ndarray,
         p_dis_ref: np.ndarray,
-        p_reg_ref: np.ndarray,
         price_e_horizon: np.ndarray,
         p_reg_committed_horizon: np.ndarray,
         u_prev: np.ndarray | None = None,
@@ -277,12 +228,21 @@ class EconomicMPC:
 
         Parameters
         ----------
-        x_est                    : ndarray (5,) EKF estimate
-        soc_ref                  : ndarray (N+1,) EMS soft anchor
-        p_chg_ref/p_dis_ref/p_reg_ref : ndarray (N,) — EMS refs (fallback only)
-        price_e_horizon          : ndarray (N,) FORECAST energy price ZOH [$/kWh]
-        p_reg_committed_horizon  : ndarray (N,) committed FCR power ZOH from EMS plan [kW]
-        u_prev                   : ndarray (3,) — previous u_cmd
+        x_est                    : ndarray (>=3,) EKF estimate. Layout
+                                   assumed `[SOC, SOH, T, ...]`.
+        soc_ref                  : ndarray (N+1,) — only `soc_ref[N]`
+                                   enters the cost (terminal anchor);
+                                   the full vector seeds the SOC
+                                   warm-start and is forwarded to the
+                                   tracking fallback.
+        p_chg_ref/p_dis_ref      : ndarray (N,) — fallback only.
+        price_e_horizon          : ndarray (N,) forecast energy price ZOH [$/kWh]
+        p_reg_committed_horizon  : ndarray (N,) committed FCR power ZOH
+                                   from EMS plan, magnitude ≥0 [kW]
+        u_prev                   : ndarray (>=2,) previous applied control.
+                                   Adapter passes the full 3-vector
+                                   `[P_chg, P_dis, P_reg]`; we only use
+                                   the first two entries.
 
         Returns
         -------
@@ -292,18 +252,27 @@ class EconomicMPC:
         opti = self._opti
         thp = self.thp
 
-        soc_ref = self._pad(soc_ref, N + 1)
-        price_e = self._pad(price_e_horizon, N)
-        p_reg_committed = self._pad(p_reg_committed_horizon, N)
+        assert len(x_est) >= 3, f"x_est must have ≥3 entries, got {len(x_est)}"
 
-        soc_0_val = float(np.clip(x_est[0], self.bp.SOC_min, self.bp.SOC_max))
+        soc_ref = pad_to(soc_ref, N + 1)
+        price_e = pad_to(price_e_horizon, N)
+        p_reg_committed = pad_to(p_reg_committed_horizon, N)
+
+        soc_raw = float(x_est[0])
+        soc_0_val = float(np.clip(soc_raw, self.bp.SOC_min, self.bp.SOC_max))
+        if soc_raw != soc_0_val and not self._clip_warned:
+            logger.warning(
+                "EconomicMPC: EKF SOC %.4f outside [%.2f, %.2f]; clipped to %.4f. "
+                "Subsequent occurrences suppressed.",
+                soc_raw, self.bp.SOC_min, self.bp.SOC_max, soc_0_val,
+            )
+            self._clip_warned = True
         soh_val = float(np.clip(x_est[1], 0.5, 1.0))
         temp_0_val = float(np.clip(x_est[2], thp.T_min - 5.0, thp.T_max + 5.0))
 
         if u_prev is None:
             u_prev = np.zeros(2)
         else:
-            # Old callers may pass length-3 [chg, dis, reg]; truncate.
             u_prev = np.asarray(u_prev, dtype=float)[:2]
 
         # Set parameters
@@ -351,27 +320,13 @@ class EconomicMPC:
             logger.warning("EconomicMPC failed (%s); falling back to TrackingMPC",
                            str(exc)[:200])
             self.last_solve_failed = True
-            # Tracking-MPC fallback so we never lose the EMS plan.
-            # Interface drift: TrackingMPC takes a 3-vector u_prev
-            # ([P_chg, P_dis, P_reg]); EconomicMPC stores only 2 entries
-            # because P_reg is exogenous here. Pad with 0.0 for the
-            # tracking call — the appended P_reg slot only feeds the
-            # tracking MPC's rate-of-change penalty on the (discarded)
-            # P_reg decision variable, so the value doesn't matter.
             u_cmd = self._tracking_fallback.solve(
                 x_est=x_est,
                 soc_ref=soc_ref,
                 p_chg_ref=p_chg_ref,
                 p_dis_ref=p_dis_ref,
-                p_reg_ref=p_reg_ref,
-                u_prev=np.append(u_prev, 0.0) if len(u_prev) == 2 else u_prev,
+                p_reg_committed_horizon=p_reg_committed,
+                u_prev=u_prev,
             )
 
         return u_cmd
-
-    @staticmethod
-    def _pad(arr: np.ndarray, target_len: int) -> np.ndarray:
-        if len(arr) >= target_len:
-            return arr[:target_len]
-        pad_val = arr[-1] if len(arr) > 0 else 0.0
-        return np.concatenate([arr, np.full(target_len - len(arr), pad_val)])

@@ -41,7 +41,7 @@ was false on inspection).
 - The 5-strategy ladder (verified in
   [comparison/run_v5_comparison.py](comparison/run_v5_comparison.py))
 - One reproduced empirical data point: the cleanup sanity test on day 0
-  produced LP $53.99, ems_clamps $54.78, economic_mpc $54.02
+  produced LP $53.99, ems $54.78, ems_economic_mpc $54.02
 - The user's restated proposition (below)
 
 ### Restated proposition (user-approved, 2026-04-15)
@@ -63,11 +63,11 @@ the next concrete deliverable.
 |---|---|---|
 | 1 | `rule_based` | Naive baseline |
 | 2 | `deterministic_lp` | Commercial baseline (LP, mean-substitution) |
-| 3 | `ems_clamps` | Canonical "EMS alone" (stochastic two-stage program) |
-| 4 | `tracking_mpc` | Sanity control (kept as broken baseline) |
-| 5 | `economic_mpc` | EMS + MPC. Production v5. |
+| 3 | `ems` | Canonical "EMS alone" (stochastic two-stage program) |
+| 4 | `ems_tracking_mpc` | EMS + Tracking MPC (controlled-experiment baseline for `ems_economic_mpc`) |
+| 5 | `ems_economic_mpc` | EMS + MPC. Production v5. |
 
-**Canonical pitch comparison:** `economic_mpc` − `ems_clamps`.
+**Canonical pitch comparison:** `ems_economic_mpc` − `ems`.
 
 ### Architectural facts (verifiable in source)
 
@@ -91,8 +91,8 @@ the next concrete deliverable.
    becomes the only trusted empirical baseline going forward. Cost:
    ~75 minutes wall.
 2. **Investigate the value leak** (after step 1 produces a baseline).
-   Walk one specific day hour-by-hour, comparing `economic_mpc`
-   against `ems_clamps`, and find where the MPC strategy loses money
+   Walk one specific day hour-by-hour, comparing `ems_economic_mpc`
+   against `ems`, and find where the MPC strategy loses money
    relative to the EMS-alone strategy. The investigation is a *reading*,
    not an experiment — output is a precise diagnosis with code
    citations, not a fix proposal.

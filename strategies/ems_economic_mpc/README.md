@@ -1,7 +1,9 @@
-# economic_mpc — Economic NLP MPC (per minute)
+# EMS + Economic MPC — production v5 strategy
+
+(module key: `ems_economic_mpc`)
 
 **Pitch-visible:** yes (the production strategy)
-**Composition:** `EconomicEMS` planner (hourly, see `strategies/ems_clamps`) + `EconomicMPC` (per-minute closed-loop)
+**Composition:** `EconomicEMS` planner (hourly, see `strategies/ems`) + `EconomicMPC` (per-minute closed-loop)
 **Solver:** CasADi `Opti` + IPOPT (MUMPS linear solver)
 
 ## What it does (plain words)
@@ -33,15 +35,12 @@ prediction horizon and control-horizon blocking after `Nc = 20` steps.
 | `soh̄`              | EKF SOH estimate, **frozen** as a parameter            | —                |
 | `p̂_e[k]`           | forecast-mean energy price for step k                  | \$/kWh           |
 | `P̄_reg[k]`         | committed FCR power, ZOH-expanded from the EMS plan    | kW               |
-| `soc_ref[k]`       | EMS SOC reference (current implementation: end-of-hour value, repeated) | — |
+| `soc_ref[N]`       | EMS end-of-hour SOC reference (only `k = N` enters the cost) | — |
 | `u_prev`           | last applied controls `(P_chg_prev, P_dis_prev)`       | kW               |
 
 | Symbol             | Meaning                                                | Default          |
 |--------------------|--------------------------------------------------------|------------------|
-| `w_e`              | energy-arbitrage weight                                | 1                |
-| `w_deg`            | degradation-cost weight                                | 1                |
-| `Q_soc_anchor`     | per-step SOC anchor                                    | 10               |
-| `Q_term_econ`      | terminal SOC anchor                                    | 1e3              |
+| `Q_term_econ`      | terminal SOC anchor (sole SOC penalty)                 | 1e3              |
 | `R_delta_econ`     | rate-of-change penalty                                 | 1e−2             |
 | `λ_soc`            | SOC slack penalty                                      | 1e6              |
 | `λ_temp`           | temperature slack penalty                              | 1e7              |
@@ -95,10 +94,10 @@ with `F` one explicit RK4 step at `Δt = 60 s`.
 
 ```
 minimise   Σ over k=0..N−1 of [
-              − w_e · p̂_e[k] · ( P_dis[j(k)] − P_chg[j(k)] ) · Δt_h     ← energy revenue (negated)
-              + w_deg · c_deg · α_deg · ( P_chg[j(k)] + P_dis[j(k)] ) · Δt_s   ← arbitrage degradation
-              + Q_soc_anchor · ( SOC[k] − soc_ref[k] )²                  ← soft EMS SOC anchor
+              − p̂_e[k] · ( P_dis[j(k)] − P_chg[j(k)] ) · Δt_h     ← energy revenue (negated)
+              + c_deg · α_deg · ( P_chg[j(k)] + P_dis[j(k)] ) · Δt_s   ← arbitrage degradation
             ]
+            (no per-step SOC anchor — see "What this MPC does NOT have")
             + R_delta_econ · ( ( P_chg[0]  − P_chg_prev )²              ← rate-of-change at k=0
                              + ( P_dis[0]  − P_dis_prev )² )
             + R_delta_econ · Σ over k=1..Nc−1 of [
@@ -158,14 +157,19 @@ blocked region of the prediction.
 ### What this MPC does NOT have
 
 - **No `P_reg` decision variable.** Reg power is exogenous (parameter from the EMS).
-- **No endurance constraint.** Currently differs from `tracking_mpc` in this respect.
+- **No endurance constraint.** Currently differs from `ems_tracking_mpc` in this respect.
 - **No stochasticity.** Single deterministic price horizon (forecast mean), single 2-state trajectory.
 - **No SOH state.** Frozen as a parameter; the slow SOH dynamics are modelled by the EMS, not the MPC.
 - **No V_rc transient states.**
 - **No multi-cell pack model.** Plans against pack-mean SOC.
-- **Per-step SOC anchor uses the end-of-hour reference at all `k`** in
-  the current implementation — see audit finding F33 for the
-  structural issue this creates inside an hour.
+- **No per-step SOC anchor.** The EMS pins end-of-hour SOC, not a
+  smooth in-hour trajectory; the intra-hour reference is fiction.
+  Penalising deviation against an invented in-hour target would fight
+  the economic term for no real reason. Cross-hour alignment is
+  handled exclusively by the terminal anchor `Q_terminal_econ ·
+  (SOC[N] − soc_ref[N])²`. (Audit F33 resolution: `ems_tracking_mpc`
+  fixes the per-step term by linearly interpolating between hourly
+  knots; `ems_economic_mpc` deletes it.)
 
 ### Empirical status (post-audit)
 
@@ -173,9 +177,9 @@ The post-audit big experiment (3 subsets × 5 days × 5 strategies × 2
 plant configurations) shows that on the current data pipeline (hourly
 day-ahead prices, no intraday or real-time signals), the per-minute
 economic re-optimization layer **does not produce a positive return**
-relative to the EMS-only baseline (`ems_clamps`). Specifically:
+relative to the EMS-only baseline (`ems`). Specifically:
 
-- `economic_mpc` loses to `ems_clamps` in 28 of 30 days, by
+- `ems_economic_mpc` loses to `ems` in 28 of 30 days, by
   \$0.06–\$0.85/day.
 - The loss is largest in the **volatile** subset, not the stressed
   subset, suggesting the failure mode is **horizon myopia**: the 60-min
@@ -188,5 +192,5 @@ relative to the EMS-only baseline (`ems_clamps`). Specifically:
 This is a **data-pipeline gap**, not (necessarily) an MPC formulation
 bug. The MPC layer would only earn its compute cost if it received
 intraday/real-time prices the EMS does not see. See the OCP write-ups
-for `ems_clamps` and `deterministic_lp` and the audit
+for `ems` and `deterministic_lp` and the audit
 [backlog](../../backlog.md) for the full diagnosis.

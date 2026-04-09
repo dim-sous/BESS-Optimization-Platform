@@ -37,6 +37,31 @@ def _window(arr: np.ndarray, offset: int, length: int) -> np.ndarray:
     return np.concatenate([available, np.full(length - len(available), pad_val)])
 
 
+def _interp_soc_ref(soc_ref_hourly: np.ndarray, ratio: int) -> np.ndarray:
+    """Linear-interpolate the hourly SOC plan to MPC resolution.
+
+    Fixes audit finding F33: the previous code stepped the SOC ref to
+    the end-of-hour value at every MPC step inside the hour, biasing
+    the in-hour trajectory. Linear interpolation between hourly knots
+    gives the per-step term a physically reasonable target.
+
+    Parameters
+    ----------
+    soc_ref_hourly : (n_hours+1,) hourly knot SOCs (start of plan, then
+                     each hour boundary).
+    ratio          : MPC steps per hour.
+
+    Returns
+    -------
+    (n_hours*ratio + 1,) per-MPC-step SOC reference, monotone interp
+    between knots, knot-aligned at every multiple of `ratio`.
+    """
+    n_hours = len(soc_ref_hourly) - 1
+    mpc_idx = np.arange(n_hours * ratio + 1)
+    knot_idx = np.arange(n_hours + 1) * ratio
+    return np.interp(mpc_idx, knot_idx, soc_ref_hourly)
+
+
 class TrackingMPCAdapter:
     """Adapt TrackingMPC to the linear simulator's uniform interface."""
 
@@ -77,8 +102,11 @@ class TrackingMPCAdapter:
         chg_mpc = np.repeat(plan_chg, ratio)
         dis_mpc = np.repeat(plan_dis, ratio)
         reg_mpc = np.repeat(plan.p_reg_hourly, ratio)
-        # SOC ref: end-of-hour values (skip initial), one per MPC step
-        soc_mpc = np.repeat(plan.soc_ref_hourly[1:], ratio)
+        # SOC ref: linear interp between hourly knots (F33 fix). The old
+        # `np.repeat(plan.soc_ref_hourly[1:], ratio)` stepped to the
+        # end-of-hour value at minute 0, which biased the per-step
+        # `Q_soc` term against a fictitious in-hour target.
+        soc_mpc = _interp_soc_ref(plan.soc_ref_hourly, ratio)
 
         # MPC offset within the expanded series
         mpc_off = offset_in_plan * ratio
@@ -92,7 +120,6 @@ class TrackingMPCAdapter:
             soc_ref=soc_win,
             p_chg_ref=pc_win,
             p_dis_ref=pd_win,
-            p_reg_ref=pr_win,
             p_reg_committed_horizon=pr_win,
             u_prev=u_prev_3,
         )
@@ -155,7 +182,6 @@ class EconomicMPCAdapter:
             soc_ref=soc_win,
             p_chg_ref=pc_win,
             p_dis_ref=pd_win,
-            p_reg_ref=pr_win,
             price_e_horizon=price_e_horizon,
             p_reg_committed_horizon=pr_win,
             u_prev=u_prev_3,

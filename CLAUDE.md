@@ -49,9 +49,9 @@ bess/
 ├── strategies/                ← one folder per strategy (recipe + README)
 │   ├── rule_based/            ← naive baseline
 │   ├── deterministic_lp/      ← commercial baseline (LP, mean-substitution)
-│   ├── ems_clamps/            ← canonical "EMS alone" (stochastic EMS, no MPC)
-│   ├── tracking_mpc/          ← sanity control (known F2 bug, not pitch)
-│   └── economic_mpc/          ← production v5 strategy (EMS + MPC)
+│   ├── ems/            ← canonical "EMS alone" (stochastic EMS, no MPC)
+│   ├── ems_tracking_mpc/      ← EMS + Tracking MPC (controlled-experiment baseline, not pitch)
+│   └── ems_economic_mpc/      ← EMS + Economic MPC (production v5 strategy)
 ├── comparison/                ← strategy comparison harness
 ├── presentation/              ← B2B pitch deck generator
 └── results/

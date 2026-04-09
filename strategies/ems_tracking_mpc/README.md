@@ -1,27 +1,29 @@
-# tracking_mpc — Tracking NLP MPC (controlled-experiment baseline)
+# EMS + Tracking MPC — controlled-experiment baseline
 
-**Pitch-visible:** no (controlled-experiment baseline for `economic_mpc`)
-**Composition:** `EconomicEMS` planner (hourly, see `strategies/ems_clamps`) + `TrackingMPC` (per-minute closed-loop)
+(module key: `ems_tracking_mpc`)
+
+**Pitch-visible:** no (controlled-experiment baseline for `ems_economic_mpc`)
+**Composition:** `EconomicEMS` planner (hourly, see `strategies/ems`) + `TrackingMPC` (per-minute closed-loop)
 **Solver:** CasADi `Opti` + IPOPT (MUMPS linear solver)
 
 ## What it does (plain words)
 
-Same prediction model and exogenous-`P_reg` handling as `economic_mpc`.
+Same prediction model and exogenous-`P_reg` handling as `ems_economic_mpc`.
 Differs in **exactly one place**: the cost function **tracks** the EMS
 plan in (SOC, P_chg, P_dis) space instead of optimizing arbitrage.
 Also includes a short-horizon FCR endurance constraint that
-`economic_mpc` does not have.
+`ems_economic_mpc` does not have.
 
 ## Optimal Control Problem
 
 This is a **deterministic NLP solved at 60 s cadence** with a 1-hour
 prediction horizon and control-horizon blocking after `Nc` steps —
-structurally identical to `economic_mpc`, with a tracking objective
+structurally identical to `ems_economic_mpc`, with a tracking objective
 substituted for the economic one and a soft endurance constraint added.
 
 ### Notation
 
-Same notation as `economic_mpc/README.md`, plus:
+Same notation as `ems_economic_mpc/README.md`, plus:
 
 | Symbol             | Meaning                                                | Default          |
 |--------------------|--------------------------------------------------------|------------------|
@@ -50,7 +52,7 @@ is the parameter `P̄_reg[k]` from the EMS plan.
 
 ### Prediction model
 
-Identical to `economic_mpc`: 2-state RK4 with frozen SOH and the
+Identical to `ems_economic_mpc`: 2-state RK4 with frozen SOH and the
 EMS-committed `P̄_reg[k]` entering the thermal Joule heating term:
 
 ```
@@ -59,7 +61,7 @@ EMS-committed `P̄_reg[k]` entering the thermal Joule heating term:
                              soh̄ )
 ```
 
-See `strategies/economic_mpc/README.md` for the explicit ODE.
+See `strategies/ems_economic_mpc/README.md` for the explicit ODE.
 
 ### Objective
 
@@ -90,7 +92,7 @@ and degradation cost at hourly cadence.
 
 **Initial conditions, dynamics, SOC bounds, temperature bounds, and
 power-budget headroom over the full horizon** are identical to
-`economic_mpc`. See `strategies/economic_mpc/README.md` for the full
+`ems_economic_mpc`. See `strategies/ems_economic_mpc/README.md` for the full
 expressions. The one addition is the endurance constraint:
 
 **Endurance (soft, at every predicted step):**
@@ -108,14 +110,14 @@ EMS's own `T_end = 30 minutes` — the EMS already enforces 30-minute
 strategic headroom; the MPC adds a tactical 5-minute cushion on top,
 scaled to typical OU activation persistence.
 
-### Difference vs `economic_mpc` (single-knob comparison)
+### Difference vs `ems_economic_mpc` (single-knob comparison)
 
-| Element                       | `tracking_mpc`              | `economic_mpc`                     |
+| Element                       | `ems_tracking_mpc`          | `ems_economic_mpc`                     |
 |-------------------------------|-----------------------------|------------------------------------|
-| SOC tracking weight           | `Q_soc = 1e4` (dominant)    | `Q_soc_anchor = 10` (soft)         |
+| Per-step SOC tracking         | `Q_soc = 1e4` vs interp ref | (none — intra-hour SOC is fiction) |
 | Power-reference tracking      | `R_power · ‖u − u_ref‖²`    | (none)                             |
-| Energy-arbitrage term         | (none)                      | `−w_e · p̂_e · (P_dis − P_chg) · Δt_h` |
-| Degradation in objective      | (none)                      | `w_deg · c_deg · α_deg · (P_chg + P_dis) · Δt_s` |
+| Energy-arbitrage term         | (none)                      | `−p̂_e · (P_dis − P_chg) · Δt_h` |
+| Degradation in objective      | (none)                      | `c_deg · α_deg · (P_chg + P_dis) · Δt_s` |
 | Endurance constraint          | `T_end_mpc = 5 min` (soft)  | (none)                             |
 | Terminal anchor               | `Q_terminal = 1e5`          | `Q_term_econ = 1e3`                |
 | Rate-of-change penalty        | `R_delta = 10`              | `R_delta_econ = 1e−2`              |
@@ -132,15 +134,20 @@ function. This makes the two-strategy comparison a controlled experiment.
 - **No SOH state.** Frozen as a parameter.
 - **No V_rc transient states.**
 - **No multi-cell pack model.**
-- **Per-step SOC anchor uses the end-of-hour reference at all `k`** in
-  the current implementation — same audit finding F33 as `economic_mpc`.
+- **Per-step SOC anchor reference is now linearly interpolated between
+  hourly EMS knots** (F33 fix). Previously the adapter step-held the
+  end-of-hour value across the whole hour, biasing the in-hour
+  trajectory; the per-step `Q_soc` term now tracks a physically
+  reasonable target so it does its actual job (disturbance rejection
+  against measured SOC drift) instead of fighting an invented in-hour
+  reference.
 
 ## History
 
 Pre-2026-04-15 this file described a "`Q_soc = 1e4` dominated old v5
 stack" with a fictitious `P_reg` decision variable that the adapter
-discarded — a strawman baseline that made the `economic_mpc` vs
-`tracking_mpc` comparison meaningless. The audit redesigned
+discarded — a strawman baseline that made the `ems_economic_mpc` vs
+`ems_tracking_mpc` comparison meaningless. The audit redesigned
 `TrackingMPC` to drop the fictitious decision variable, add the
 endurance constraint, and use the same exogenous `P_reg` handling as
-`economic_mpc`. After the redesign, the comparison is honest.
+`ems_economic_mpc`. After the redesign, the comparison is honest.

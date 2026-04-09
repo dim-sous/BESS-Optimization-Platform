@@ -6,12 +6,11 @@ on real EPEX SPOT day-ahead + SMARD FCR prices (Q1 2024).
 Pitch-visible (B2B):
   1. rule_based       — naive price-sorted dispatch, no FCR
   2. deterministic_lp — commercial-baseline rolling-horizon LP
-  3. economic_mpc     — v5 product (stochastic EMS + economic MPC + PI)
+  3. ems_economic_mpc — v5 product (EMS + Economic MPC)
 
 Internal sanity checks (NOT in pitch deck):
-  4. ems_clamps       — stochastic EMS + open-loop dispatch
-  5. ems_pi           — stochastic EMS + PI (no MPC)
-  6. tracking_mpc     — stochastic EMS + tracking MPC + PI (old v5 stack)
+  4. ems              — stochastic EMS + open-loop dispatch
+  5. ems_tracking_mpc — EMS + Tracking MPC (controlled-experiment baseline)
 
 All strategies share identical conditions per day: same realized prices,
 same forecast scenarios (realized day held out), same activation seed.
@@ -59,10 +58,10 @@ from core.simulator.core import run_simulation  # noqa: E402
 
 # Strategy recipes — each module exposes `make_strategy(**params) -> Strategy`
 from strategies.deterministic_lp.strategy import make_strategy as _ms_lp  # noqa: E402
-from strategies.economic_mpc.strategy import make_strategy as _ms_econ  # noqa: E402
-from strategies.ems_clamps.strategy import make_strategy as _ms_clamps  # noqa: E402
+from strategies.ems_economic_mpc.strategy import make_strategy as _ms_econ  # noqa: E402
+from strategies.ems.strategy import make_strategy as _ms_ems  # noqa: E402
 from strategies.rule_based.strategy import make_strategy as _ms_rb  # noqa: E402
-from strategies.tracking_mpc.strategy import make_strategy as _ms_track  # noqa: E402
+from strategies.ems_tracking_mpc.strategy import make_strategy as _ms_track  # noqa: E402
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -80,29 +79,29 @@ RESULTS_DIR = REPO_ROOT / "results"
 # Pitch deck renders only the "pitch_visible" subset.
 #
 # 2026-04-15 cleanup: PI is gone (deleted as ceremonial post-RF1). The
-# `ems_pi` strategy is gone (was identical to `ems_clamps` post-RF1).
+# `ems_pi` strategy is gone (was identical to `ems` post-RF1).
 # The `_no_pi` MPC variants are gone (PI doesn't exist any more, so
 # the counterfactual is meaningless). 5 strategies, one canonical
-# pitch comparison: economic_mpc vs ems_clamps.
+# pitch comparison: ems_economic_mpc vs ems.
 STRATEGY_FACTORIES = [
     ("rule_based",       _ms_rb),
     ("deterministic_lp", _ms_lp),
-    ("ems_clamps",       _ms_clamps),
-    ("tracking_mpc",     _ms_track),
-    ("economic_mpc",     _ms_econ),
+    ("ems",       _ms_ems),
+    ("ems_tracking_mpc", _ms_track),
+    ("ems_economic_mpc",     _ms_econ),
 ]
 STRAT_NAMES = [name for name, _ in STRATEGY_FACTORIES]
 
 STRATEGY_LABELS = {
     "rule_based":       "Rule-Based",
     "deterministic_lp": "Commercial Baseline (LP)",
-    "ems_clamps":       "Stochastic EMS (alone)",
-    "tracking_mpc":     "Tracking MPC (sanity)",
-    "economic_mpc":     "Economic MPC (v5)",
+    "ems":       "Stochastic EMS (alone)",
+    "ems_tracking_mpc": "EMS + Tracking MPC",
+    "ems_economic_mpc": "EMS + Economic MPC",
 }
 
 # Strategies shown in the B2B pitch deck.
-PITCH_VISIBLE = {"rule_based", "deterministic_lp", "ems_clamps", "economic_mpc"}
+PITCH_VISIBLE = {"rule_based", "deterministic_lp", "ems", "ems_economic_mpc"}
 
 # --big experiment uses the same registry post-cleanup (no _no_pi
 # variants exist any more, so there is no separate "extended" set).
@@ -110,16 +109,16 @@ BIG_STRATEGY_FACTORIES = STRATEGY_FACTORIES
 BIG_STRATEGY_LABELS = {
     "rule_based":       "Rule-Based",
     "deterministic_lp": "Det. LP",
-    "ems_clamps":       "EMS alone",
-    "tracking_mpc":     "Trk MPC",
-    "economic_mpc":     "Econ MPC",
+    "ems":       "EMS alone",
+    "ems_tracking_mpc": "EMS+Trk MPC",
+    "ems_economic_mpc": "EMS+Econ MPC",
 }
 
 # Strategies whose first-day-per-subset traces we persist for visualization.
-# The pitch comparison is economic_mpc vs ems_clamps; we keep LP traces too
+# The pitch comparison is ems_economic_mpc vs ems; we keep LP traces too
 # for context against the commercial baseline.
 TRACE_PERSIST_STRATEGIES = {
-    "deterministic_lp", "ems_clamps", "economic_mpc",
+    "deterministic_lp", "ems", "ems_economic_mpc",
 }
 
 
@@ -444,9 +443,9 @@ def _print_big_summary(agg: dict, subsets: list[dict], strat_names: list[str]) -
             print(f"  {float(np.mean(vals)):14.2f}", end="")
         print()
 
-    # Headline pitch comparison: economic_mpc vs ems_clamps (the
+    # Headline pitch comparison: ems_economic_mpc vs ems (the
     # canonical "is the MPC layer worth its compute" diff).
-    print("\n  ── Headline: economic_mpc − ems_clamps ($/day) ──")
+    print("\n  ── Headline: ems_economic_mpc − ems ($/day) ──")
     print(f"    {'metric':40s}", end="")
     for sub in subsets:
         print(f"  {sub['id']:>14s}", end="")
@@ -454,8 +453,8 @@ def _print_big_summary(agg: dict, subsets: list[dict], strat_names: list[str]) -
     print("    " + "─" * 40 + ("  " + "─" * 14) * len(subsets))
     print(f"    {'profit advantage':40s}", end="")
     for sub in subsets:
-        mpc_profit = float(np.mean([d["total_profit"] for d in agg[sub["id"]]["economic_mpc"]]))
-        ems_profit = float(np.mean([d["total_profit"] for d in agg[sub["id"]]["ems_clamps"]]))
+        mpc_profit = float(np.mean([d["total_profit"] for d in agg[sub["id"]]["ems_economic_mpc"]]))
+        ems_profit = float(np.mean([d["total_profit"] for d in agg[sub["id"]]["ems"]]))
         print(f"  {(mpc_profit - ems_profit):+14.3f}", end="")
     print()
 
@@ -567,7 +566,7 @@ def _run_big_experiment(n_days_per_subset: int, bare_plant: bool = False) -> Non
             eta = elapsed / i * (len(jobs) - i)
             sid = r["subset_id"]
             day = r["day_idx"]
-            head = r.get("economic_mpc", {}).get("total_profit", float("nan"))
+            head = r.get("ems_economic_mpc", {}).get("total_profit", float("nan"))
             print(
                 f"  [{i:3d}/{len(jobs)}]  {sid:10s} day {day:2d}  "
                 f"econ_mpc=${head:6.2f}  "
@@ -729,9 +728,9 @@ def print_results(agg: dict[str, dict], n_days: int) -> None:
     _row("MPC failures (total)",
          [int(np.sum(agg[s]["mpc_failures"])) for s in STRAT_NAMES])
 
-    # ---- Pitch comparison: economic_mpc vs rule_based and deterministic_lp ----
-    if "economic_mpc" in agg and "deterministic_lp" in agg:
-        econ = np.array(agg["economic_mpc"]["profits"])
+    # ---- Pitch comparison: ems_economic_mpc vs rule_based and deterministic_lp ----
+    if "ems_economic_mpc" in agg and "deterministic_lp" in agg:
+        econ = np.array(agg["ems_economic_mpc"]["profits"])
         lp = np.array(agg["deterministic_lp"]["profits"])
 
         if "rule_based" in agg:
@@ -751,9 +750,9 @@ def print_results(agg: dict[str, dict], n_days: int) -> None:
         print(f"    Annual (50 MWh):  ${adv.mean() * 365 * 250:,.0f}")
 
     # ---- Sanity comparison: economic vs tracking MPC ----
-    if "tracking_mpc" in agg and "economic_mpc" in agg:
-        econ = np.array(agg["economic_mpc"]["profits"])
-        trk = np.array(agg["tracking_mpc"]["profits"])
+    if "ems_tracking_mpc" in agg and "ems_economic_mpc" in agg:
+        econ = np.array(agg["ems_economic_mpc"]["profits"])
+        trk = np.array(agg["ems_tracking_mpc"]["profits"])
         print(f"\n  [SANITY] Economic MPC vs Tracking MPC:")
         adv = econ - trk
         print(f"    Advantage:  ${adv.mean():.2f}/day  "
@@ -788,8 +787,8 @@ def main() -> None:
     parser.add_argument(
         "--big", action="store_true",
         help="Run the big experiment: 3 subsets (calm/volatile/stressed) "
-             "x 5 strategies (rule_based, deterministic_lp, ems_clamps, "
-             "tracking_mpc, economic_mpc).",
+             "x 5 strategies (rule_based, deterministic_lp, ems, "
+             "ems_tracking_mpc, ems_economic_mpc).",
     )
     parser.add_argument(
         "--big-n", type=int, default=5,
@@ -892,7 +891,7 @@ def main() -> None:
             elapsed = time.perf_counter() - t0
             eta = elapsed / i * (len(jobs) - i)
             day_idx = result["day_idx"]
-            headline_key = "economic_mpc" if "economic_mpc" in result else "tracking_mpc"
+            headline_key = "ems_economic_mpc" if "ems_economic_mpc" in result else "ems_tracking_mpc"
             head_profit = result[headline_key]["total_profit"]
             head_score = result[headline_key]["delivery_score"]
             print(

@@ -238,18 +238,10 @@ class MPCParams:
     slack_penalty_temp: float = 1e7    # Soft temperature constraint penalty
     n_blend_steps: int = 5             # EMS boundary reference smoothing  [MPC steps]
 
-    # ---- EconomicMPC weights (Step 3, v5 reformulation) ----
-    # Soft EMS-anchor weights. These must be small enough that economic
-    # gains from intra-hour price moves can dominate, but large enough
-    # that the MPC stays on the EMS strategic plan when prices are flat.
-    #
-    # Magnitude check: a single step at Q_soc_anchor=10 with SOC deviation
-    # 0.05 contributes 10*0.0025 = 0.025 to the cost. Summed over 60 steps
-    # that's $1.5 — small enough to lose to a real price arbitrage gain
-    # of $5-15/hour but big enough to keep the trajectory near the plan
-    # when there's no signal.
-    Q_soc_anchor: float = 1e1
+    # ---- EconomicMPC weights ----
     # Terminal anchor: cross-hour SOC alignment with EMS plan.
+    # EconomicMPC has no per-step SOC anchor (intra-hour SOC trajectory
+    # is fiction — the EMS pins end-of-hour SOC only).
     # 1e3 * (0.05)^2 = 2.5 cost for a 5% SOC drift at end of horizon.
     Q_terminal_econ: float = 1e3
     # Rate-of-change smoothness for economic MPC. Must be small enough
@@ -258,13 +250,6 @@ class MPCParams:
     # 0.01 * 100^2 = $100 first-step cost vs typical $50/h profit — small
     # enough to allow large transitions, big enough to suppress chatter.
     R_delta_econ: float = 0.01
-    # Economic term weights (kept at 1.0; the price terms carry the units).
-    # Tunable if any single term dominates pathologically.
-    w_e: float = 1.0                   # energy arbitrage profit
-    w_cap: float = 1.0                 # FCR capacity payment
-    w_del: float = 1.0                 # delivery reward
-    w_pen: float = 1.0                 # non-delivery penalty
-    w_deg: float = 1.0                 # degradation cost
 
     # ---- TrackingMPC: short-horizon FCR delivery headroom ----
     # The MPC enforces enough SOC headroom at every predicted step to
@@ -273,8 +258,14 @@ class MPCParams:
     # close to the EMS strategic plan without duplicating the EMS's own
     # 30-minute endurance, long enough to absorb a typical OU activation
     # burst (the OU correlation time is ~5 min). Soft constraint with the
-    # standard slack_penalty.
+    # dedicated `slack_penalty_endurance` (smaller than `slack_penalty`)
+    # so a tactical 5-min endurance miss does not get punished as hard
+    # as a hard SOC-bound violation.
     endurance_hours_mpc: float = 5.0 / 60.0
+    # 1e3 ≪ slack_penalty (1e6): endurance is a tactical cushion, not a
+    # hard physical limit. Strategic 30-min endurance is enforced by the
+    # EMS; the MPC's job is just to absorb OU bursts on top.
+    slack_penalty_endurance: float = 1e3
 
 
 @dataclass(frozen=True)
@@ -312,14 +303,13 @@ class Strategy(str, Enum):
                           product being pitched.
 
     Internal sanity-check strategies (NOT in pitch deck):
-        EMS_CLAMPS:       Stochastic EMS + hard SOC clamps. Verifies the
-                          scenario-based EMS in isolation (uses our own
-                          EMS so it would be "cheating" as a commercial
-                          baseline).
+        EMS:              Stochastic two-stage EMS, no MPC layer. The
+                          canonical "EMS alone" baseline against which
+                          ems_economic_mpc must justify the MPC layer.
     """
 
     RULE_BASED = "rule_based"
-    EMS_CLAMPS = "ems_clamps"
+    EMS = "ems"
     DETERMINISTIC_LP = "deterministic_lp"
     FULL_ECON = "full_econ"
 

@@ -49,6 +49,7 @@ from core.config.parameters import (
     ThermalParams,
     TimeParams,
 )
+from core.mpc._common import ipopt_opts, pad_to
 from core.physics.plant import build_casadi_dynamics_3state
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ class TrackingMPC:
         for k in range(N + 1):
             cost += mp.slack_penalty * eps[k] ** 2
             cost += mp.slack_penalty_temp * eps_temp[k] ** 2
-            cost += mp.slack_penalty * eps_endurance[k] ** 2
+            cost += mp.slack_penalty_endurance * eps_endurance[k] ** 2
 
         opti.minimize(cost)
 
@@ -262,37 +263,15 @@ class TrackingMPC:
         # reg power at the corresponding horizon step. Enforced over the
         # full prediction horizon (not just the unblocked window) so the
         # blocked region cannot propagate a physically infeasible plan.
+        # NOTE: assumes p_reg_committed_p ≥ 0 (magnitude of symmetric FCR
+        # capacity). If reg ever becomes signed/directional, replace with
+        # ca.fabs(p_reg_committed_p[k]).
         for k in range(N):
             j = min(k, Nc - 1)
             opti.subject_to(P_chg[j] + p_reg_committed_p[k] <= bp.P_max_kw)
             opti.subject_to(P_dis[j] + p_reg_committed_p[k] <= bp.P_max_kw)
 
-        # ---- Solver options ----
-        opts = {
-            "ipopt.print_level": 0,
-            "ipopt.sb": "yes",
-            "print_time": 0,
-            "ipopt.max_iter": 500,
-            "ipopt.tol": 1e-6,
-            "ipopt.acceptable_tol": 1e-4,
-            "ipopt.warm_start_init_point": "yes",
-            "ipopt.mu_init": 1e-3,
-        }
-        # JIT codegen: compile NLP to native shared object on first call.
-        # ~2x solve speedup with zero accuracy loss; one-time ~1-5s compile cost
-        # is amortized across the 84-day comparison run. Enabled by default —
-        # this is what a production deployment would use. Set BESS_JIT=0 to
-        # disable for A/B equivalence checks.
-        # HSL MA57 linear solver intentionally NOT enabled (no academic license);
-        # MUMPS remains the default IPOPT linear solver.
-        import os as _os
-        if _os.environ.get("BESS_JIT", "1") != "0":
-            opts.update({
-                "jit": True,
-                "compiler": "shell",
-                "jit_options": {"flags": ["-O3", "-march=native"], "verbose": False},
-            })
-        opti.solver("ipopt", opts)
+        opti.solver("ipopt", ipopt_opts())
 
         # ---- Store handles ----
         self._opti = opti
@@ -322,29 +301,27 @@ class TrackingMPC:
         soc_ref: np.ndarray,
         p_chg_ref: np.ndarray,
         p_dis_ref: np.ndarray,
-        p_reg_ref: np.ndarray,
-        p_reg_committed_horizon: np.ndarray | None = None,
+        p_reg_committed_horizon: np.ndarray,
         u_prev: np.ndarray | None = None,
     ) -> np.ndarray:
         """Compute the tracking-MPC control action.
 
         Parameters
         ----------
-        x_est                    : ndarray (5,) EKF estimate; SOH frozen, V_rc ignored
+        x_est                    : ndarray (>=3,) EKF estimate. Layout
+                                   assumed `[SOC, SOH, T, ...]` — must
+                                   match the EKF state convention.
         soc_ref                  : ndarray (N+1,) EMS SOC reference
         p_chg_ref/p_dis_ref      : ndarray (N,)   EMS chg/dis references
-        p_reg_ref                : ndarray (N,)   EMS reg references (kept
-                                   for interface compatibility; folded into
-                                   p_reg_committed_horizon if that arg is
-                                   None — they are equal in normal use)
         p_reg_committed_horizon  : ndarray (N,)   EMS-committed FCR power
-                                   ZOH per MPC step. Used by both the
-                                   dynamics prediction and the endurance
-                                   constraint.
+                                   (magnitude, ≥0) ZOH per MPC step. Used
+                                   by both the dynamics prediction and the
+                                   endurance constraint.
         u_prev                   : ndarray (2 or 3,) previous applied
                                    [P_chg, P_dis] (any third entry is
-                                   ignored, kept for back-compat with
-                                   length-3 callers).
+                                   ignored). If None, defaults to zeros
+                                   so the rate-of-change penalty is
+                                   meaningful at startup.
 
         Returns
         -------
@@ -354,25 +331,25 @@ class TrackingMPC:
         opti = self._opti
         thp = self.thp
 
-        soc_ref = self._pad(soc_ref, N + 1)
-        p_chg_ref = self._pad(p_chg_ref, N)
-        p_dis_ref = self._pad(p_dis_ref, N)
-        p_reg_ref = self._pad(p_reg_ref, N)
+        # Defensive: x_est layout is hard-coded by index. If the EKF
+        # state vector ever shrinks below [SOC, SOH, T, ...] this will
+        # surface immediately rather than silently mis-indexing.
+        assert len(x_est) >= 3, f"x_est must have ≥3 entries, got {len(x_est)}"
 
-        # Default the committed reg horizon to the (legacy) p_reg_ref —
-        # callers that pre-date the explicit committed-horizon argument
-        # were passing the same EMS reg array under both names.
-        if p_reg_committed_horizon is None:
-            p_reg_committed = p_reg_ref
-        else:
-            p_reg_committed = self._pad(p_reg_committed_horizon, N)
+        soc_ref = pad_to(soc_ref, N + 1)
+        p_chg_ref = pad_to(p_chg_ref, N)
+        p_dis_ref = pad_to(p_dis_ref, N)
+        p_reg_committed = pad_to(p_reg_committed_horizon, N)
 
         soc_0_val = float(np.clip(x_est[0], self.bp.SOC_min, self.bp.SOC_max))
         soh_val = float(np.clip(x_est[1], 0.5, 1.0))
         temp_0_val = float(np.clip(x_est[2], thp.T_min - 5.0, thp.T_max + 5.0))
 
         if u_prev is None:
-            u_prev = np.array([p_chg_ref[0], p_dis_ref[0]])
+            # Zero default — not the EMS reference. Defaulting to the
+            # reference would null out the rate-of-change penalty at
+            # startup, which is exactly when we most want smoothness.
+            u_prev = np.zeros(2)
         else:
             # Old callers may pass length-3 [chg, dis, reg]; truncate.
             u_prev = np.asarray(u_prev, dtype=float)[:2]
@@ -425,18 +402,10 @@ class TrackingMPC:
         except RuntimeError as exc:
             logger.warning("MPC solver failed: %s", str(exc)[:200])
             self.last_solve_failed = True
-            u_cmd = np.zeros(3)
+            # Forward the EMS-committed reg power even on solver failure.
+            # The MPC does not own that decision — zeroing P_reg here
+            # would silently renege on the EMS's market commitment.
+            u_cmd = np.array([0.0, 0.0, float(p_reg_committed[0])])
 
         return u_cmd
 
-    # ------------------------------------------------------------------
-    #  Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _pad(arr: np.ndarray, target_len: int) -> np.ndarray:
-        """Pad (or truncate) an array to *target_len* by repeating the last value."""
-        if len(arr) >= target_len:
-            return arr[:target_len]
-        pad_val = arr[-1] if len(arr) > 0 else 0.0
-        return np.concatenate([arr, np.full(target_len - len(arr), pad_val)])
