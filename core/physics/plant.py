@@ -887,12 +887,20 @@ class BatteryPack:
         P_reg_cell = P_reg / n
 
         # ---- 4. Active balancing (zero-sum delta on top of base) ----
+        # Sign convention: positive p_net = discharge, so a cell ABOVE the
+        # pack average should get a POSITIVE bal (discharge more) to bring
+        # its SOC down toward the average. A cell BELOW the average should
+        # get a NEGATIVE bal (charge more) to bring its SOC up. The
+        # corrective term is therefore `gain * (cell_soc - soc_avg)`.
+        # The previous formulation `gain * (soc_avg - cell_soc)` had the
+        # sign inverted and amplified divergence rather than correcting it,
+        # causing cells to saturate at SOC_min/SOC_max within hours.
         if self.pp.balancing_enabled:
             cell_socs = cell_states[:, 0]
             soc_avg = np.mean(cell_socs)
-            bal = self.pp.balancing_gain * (soc_avg - cell_socs)
+            bal = self.pp.balancing_gain * (cell_socs - soc_avg)
             bal = np.clip(bal, -self.pp.max_balancing_power, self.pp.max_balancing_power)
-            bal -= np.mean(bal)  # enforce zero-sum
+            bal -= np.mean(bal)  # enforce zero-sum (no net pack-level effect)
             self._balancing_power = bal.copy()
         else:
             self._balancing_power = np.zeros(n)

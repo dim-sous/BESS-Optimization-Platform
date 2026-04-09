@@ -378,5 +378,14 @@ class PackParams:
     initial_soc_spread: float = 0.02          # +/-2% initial SOC variation  [-]
     balancing_enabled: bool = True             # Enable active cell balancing
     balancing_gain: float = 50.0              # Proportional gain  [kW / unit SOC error]
-    max_balancing_power: float = 1.0          # Max balancing power per cell  [kW]
+    # Module-level active balancing power cap. 5 kW/module is a defensible
+    # midpoint for utility-scale active balancers based on DC-DC converters
+    # (typical range 2-10 kW per module for 50 kWh modules in a 200 kWh pack).
+    # The previous value of 1 kW was 5x too weak: at the observed ~2 kW/module
+    # average divergence rate from the 3% capacity / 8% resistance spread,
+    # 1 kW could not keep up and cell SOCs ran away to the bounds within
+    # 20 hours, electrically immobilising the pack regardless of strategy.
+    # 5 kW gives ~2.5x headroom over normal-operation divergence and keeps
+    # the pack balanced over a multi-day horizon.
+    max_balancing_power: float = 5.0          # Max balancing power per cell  [kW]
     seed: int = 123                           # RNG seed for cell variation
