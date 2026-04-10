@@ -61,6 +61,7 @@ def _build_2state_integrator(
     elp: ElectricalParams,
     dt: float,
     soh_param: ca.MX,
+    expected_activation_frac: float = 0.0,
 ) -> ca.Function:
     """Build a 2-state (SOC, T) RK4 integrator with SOH as an external parameter.
 
@@ -71,7 +72,10 @@ def _build_2state_integrator(
     -------
     ca.Function  (x2[2], u[3], soh[1]) -> x2_next[2]
     """
-    f3 = build_casadi_dynamics_3state(bp, thp, elp)
+    f3 = build_casadi_dynamics_3state(
+        bp, thp, elp,
+        expected_activation_frac=expected_activation_frac,
+    )
 
     x2 = ca.MX.sym("x2", 2)   # [SOC, T]
     u = ca.MX.sym("u", 3)
@@ -114,12 +118,14 @@ class TrackingMPC:
         mp: MPCParams,
         thp: ThermalParams,
         elp: ElectricalParams,
+        expected_activation_frac: float = 0.0,
     ) -> None:
         self.bp = bp
         self.tp = tp
         self.mp = mp
         self.thp = thp
         self.elp = elp
+        self._expected_activation_frac = expected_activation_frac
 
         # Solver failure tracking
         self.last_solve_failed = False
@@ -171,6 +177,7 @@ class TrackingMPC:
         # ---- 2-state integrator with SOH parameter ----
         F_mpc = _build_2state_integrator(
             bp, thp, self.elp, self.tp.dt_mpc, soh_p,
+            expected_activation_frac=self._expected_activation_frac,
         )
 
         # ---- Initial conditions ----

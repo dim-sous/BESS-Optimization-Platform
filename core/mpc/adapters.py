@@ -91,10 +91,8 @@ class TrackingMPCAdapter:
 
         # Plan.p_*_hourly are arrays of length n_hours from the planner
         # We expand them to MPC resolution. The plan started at plan.start_step.
-        offset_in_plan = (sim_step - plan.start_step) // steps_per_hour
 
         # Build hourly source arrays from the plan's signed P_net split into chg/dis
-        n_plan_hours = len(plan.p_net_hourly)
         plan_chg = np.where(plan.p_net_hourly < 0, -plan.p_net_hourly, 0.0)
         plan_dis = np.where(plan.p_net_hourly > 0, plan.p_net_hourly, 0.0)
 
@@ -108,8 +106,10 @@ class TrackingMPCAdapter:
         # `Q_soc` term against a fictitious in-hour target.
         soc_mpc = _interp_soc_ref(plan.soc_ref_hourly, ratio)
 
-        # MPC offset within the expanded series
-        mpc_off = offset_in_plan * ratio
+        # MPC offset within the expanded series at MPC-step resolution.
+        # Must advance within the hour so the SOC reference window tracks
+        # the current position, not the hour boundary.
+        mpc_off = (sim_step - plan.start_step) // steps_per_mpc
         soc_win = _window(soc_mpc, mpc_off, N + 1)
         pc_win = _window(chg_mpc, mpc_off, N)
         pd_win = _window(dis_mpc, mpc_off, N)
@@ -157,22 +157,21 @@ class EconomicMPCAdapter:
         ratio = steps_per_hour // steps_per_mpc
 
         # Plan-derived references at MPC resolution
-        offset_in_plan = (sim_step - plan.start_step) // steps_per_hour
         plan_chg = np.where(plan.p_net_hourly < 0, -plan.p_net_hourly, 0.0)
         plan_dis = np.where(plan.p_net_hourly > 0, plan.p_net_hourly, 0.0)
         chg_mpc = np.repeat(plan_chg, ratio)
         dis_mpc = np.repeat(plan_dis, ratio)
         reg_mpc = np.repeat(plan.p_reg_hourly, ratio)
-        soc_mpc = np.repeat(plan.soc_ref_hourly[1:], ratio)
+        soc_mpc = _interp_soc_ref(plan.soc_ref_hourly, ratio)
 
-        mpc_off = offset_in_plan * ratio
+        # MPC offset at MPC-step resolution (must advance within hour).
+        mpc_off = (sim_step - plan.start_step) // steps_per_mpc
         soc_win = _window(soc_mpc, mpc_off, N + 1)
         pc_win = _window(chg_mpc, mpc_off, N)
         pd_win = _window(dis_mpc, mpc_off, N)
         pr_win = _window(reg_mpc, mpc_off, N)
 
         # Forecast-mean energy price horizon at MPC resolution
-        # ZOH-expand from hourly forecast mean
         forecast_mean_e = forecast_e.T @ probabilities  # (n_hours,)
         e_mpc = np.repeat(forecast_mean_e, ratio)
         price_e_horizon = _window(e_mpc, mpc_off, N)

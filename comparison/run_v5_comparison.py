@@ -10,7 +10,7 @@ Pitch-visible (B2B):
 
 Internal sanity checks (NOT in pitch deck):
   4. ems              — stochastic EMS + open-loop dispatch
-  5. ems_tracking_mpc — EMS + Tracking MPC (controlled-experiment baseline)
+  (tracking MPC removed — unified into economic MPC)
 
 All strategies share identical conditions per day: same realized prices,
 same forecast scenarios (realized day held out), same activation seed.
@@ -61,7 +61,6 @@ from strategies.deterministic_lp.strategy import make_strategy as _ms_lp  # noqa
 from strategies.ems_economic_mpc.strategy import make_strategy as _ms_econ  # noqa: E402
 from strategies.ems.strategy import make_strategy as _ms_ems  # noqa: E402
 from strategies.rule_based.strategy import make_strategy as _ms_rb  # noqa: E402
-from strategies.ems_tracking_mpc.strategy import make_strategy as _ms_track  # noqa: E402
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -86,17 +85,15 @@ RESULTS_DIR = REPO_ROOT / "results"
 STRATEGY_FACTORIES = [
     ("rule_based",       _ms_rb),
     ("deterministic_lp", _ms_lp),
-    ("ems",       _ms_ems),
-    ("ems_tracking_mpc", _ms_track),
-    ("ems_economic_mpc",     _ms_econ),
+    ("ems",              _ms_ems),
+    ("ems_economic_mpc", _ms_econ),
 ]
 STRAT_NAMES = [name for name, _ in STRATEGY_FACTORIES]
 
 STRATEGY_LABELS = {
     "rule_based":       "Rule-Based",
     "deterministic_lp": "Commercial Baseline (LP)",
-    "ems":       "Stochastic EMS (alone)",
-    "ems_tracking_mpc": "EMS + Tracking MPC",
+    "ems":              "Stochastic EMS (alone)",
     "ems_economic_mpc": "EMS + Economic MPC",
 }
 
@@ -109,8 +106,7 @@ BIG_STRATEGY_FACTORIES = STRATEGY_FACTORIES
 BIG_STRATEGY_LABELS = {
     "rule_based":       "Rule-Based",
     "deterministic_lp": "Det. LP",
-    "ems":       "EMS alone",
-    "ems_tracking_mpc": "EMS+Trk MPC",
+    "ems":              "EMS alone",
     "ems_economic_mpc": "EMS+Econ MPC",
 }
 
@@ -749,15 +745,6 @@ def print_results(agg: dict[str, dict], n_days: int) -> None:
               f"({pct:+.1f}% vs LP, {(adv > 0).mean() * 100:.0f}% win rate)")
         print(f"    Annual (50 MWh):  ${adv.mean() * 365 * 250:,.0f}")
 
-    # ---- Sanity comparison: economic vs tracking MPC ----
-    if "ems_tracking_mpc" in agg and "ems_economic_mpc" in agg:
-        econ = np.array(agg["ems_economic_mpc"]["profits"])
-        trk = np.array(agg["ems_tracking_mpc"]["profits"])
-        print(f"\n  [SANITY] Economic MPC vs Tracking MPC:")
-        adv = econ - trk
-        print(f"    Advantage:  ${adv.mean():.2f}/day  "
-              f"({(adv > 0).mean() * 100:.0f}% win rate)")
-
     # Wall time
     print(f"\n  Wall Time (mean s/day):")
     _header()
@@ -787,8 +774,8 @@ def main() -> None:
     parser.add_argument(
         "--big", action="store_true",
         help="Run the big experiment: 3 subsets (calm/volatile/stressed) "
-             "x 5 strategies (rule_based, deterministic_lp, ems, "
-             "ems_tracking_mpc, ems_economic_mpc).",
+             "x 4 strategies (rule_based, deterministic_lp, ems, "
+             "ems_economic_mpc).",
     )
     parser.add_argument(
         "--big-n", type=int, default=5,
@@ -891,7 +878,7 @@ def main() -> None:
             elapsed = time.perf_counter() - t0
             eta = elapsed / i * (len(jobs) - i)
             day_idx = result["day_idx"]
-            headline_key = "ems_economic_mpc" if "ems_economic_mpc" in result else "ems_tracking_mpc"
+            headline_key = "ems_economic_mpc" if "ems_economic_mpc" in result else "ems"
             head_profit = result[headline_key]["total_profit"]
             head_score = result[headline_key]["delivery_score"]
             print(

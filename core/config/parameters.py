@@ -230,28 +230,20 @@ class MPCParams:
 
     N_mpc: int = 60                    # Prediction horizon  [steps at dt_mpc]
     Nc_mpc: int = 20                   # Control horizon  [steps at dt_mpc]
-    Q_soc: float = 1e4                 # SOC tracking weight (TrackingMPC only)
-    R_power: float = 1.0               # Power reference tracking weight (per input)
+    Q_soc: float = 1e4                 # Per-step SOC tracking weight
+    R_power: float = 1.0               # Power reference tracking weight (TrackingMPC only)
     R_delta: float = 10.0              # Control rate-of-change penalty
-    Q_terminal: float = 1e5            # Terminal SOC penalty (both MPC variants)
+    Q_terminal: float = 1e5            # Terminal SOC penalty
     slack_penalty: float = 1e6         # Soft SOC constraint violation penalty
     slack_penalty_temp: float = 1e7    # Soft temperature constraint penalty
     n_blend_steps: int = 5             # EMS boundary reference smoothing  [MPC steps]
 
-    # ---- EconomicMPC weights ----
-    # Terminal anchor: cross-hour SOC alignment with EMS plan.
-    # EconomicMPC has no per-step SOC anchor (intra-hour SOC trajectory
-    # is fiction — the EMS pins end-of-hour SOC only).
-    # 1e3 * (0.05)^2 = 2.5 cost for a 5% SOC drift at end of horizon.
-    Q_terminal_econ: float = 1e3
-    # Rate-of-change smoothness for economic MPC. Must be small enough
-    # that the first MPC action can step from 0 to P_max when there's a
-    # real economic reason to do so (cold start of an arbitrage move).
-    # 0.01 * 100^2 = $100 first-step cost vs typical $50/h profit — small
-    # enough to allow large transitions, big enough to suppress chatter.
+    # Rate-of-change smoothness for economic MPC. Smaller than R_delta
+    # because the economic MPC must execute large charge/discharge
+    # transitions at hour boundaries where prices change.
     R_delta_econ: float = 0.01
 
-    # ---- TrackingMPC: short-horizon FCR delivery headroom ----
+    # ---- Short-horizon FCR delivery headroom ----
     # The MPC enforces enough SOC headroom at every predicted step to
     # sustain the EMS-committed P_reg in either direction for this many
     # hours. Defaults to 5 minutes — short enough that the MPC can stay

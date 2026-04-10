@@ -30,14 +30,12 @@ from core.simulator.synthetic_day import make_synthetic_day  # noqa: E402
 from strategies.deterministic_lp.strategy import make_strategy as _ms_lp  # noqa: E402
 from strategies.ems.strategy import make_strategy as _ms_ems  # noqa: E402
 from strategies.ems_economic_mpc.strategy import make_strategy as _ms_econ  # noqa: E402
-from strategies.ems_tracking_mpc.strategy import make_strategy as _ms_track  # noqa: E402
 from strategies.rule_based.strategy import make_strategy as _ms_rb  # noqa: E402
 
 STRATEGY_FACTORIES = [
     ("rule_based",       _ms_rb),
     ("deterministic_lp", _ms_lp),
     ("ems",              _ms_ems),
-    ("ems_tracking_mpc", _ms_track),
     ("ems_economic_mpc", _ms_econ),
 ]
 
@@ -53,7 +51,10 @@ def main() -> None:
     thp = ThermalParams()
     elp = ElectricalParams()
     pp = PackParams()
-    reg_p = RegulationParams(activation_seed=day.recommended_activation_seed)
+    reg_p = RegulationParams(
+        activation_seed=day.recommended_activation_seed,
+        sigma_mhz_mult=day.recommended_sigma_mhz_mult,
+    )
 
     params = dict(
         bp=bp, tp=tp, ep=ep, mp=mp, ekf_p=ekf_p,
@@ -92,7 +93,7 @@ def main() -> None:
 
     order = [r["name"] for r in sorted(rows, key=lambda r: r["total"])]
     expected = ["rule_based", "deterministic_lp", "ems",
-                "ems_tracking_mpc", "ems_economic_mpc"]
+                "ems_economic_mpc"]
     print(f"\nrealized order (worst -> best): {order}")
     print(f"target order                  : {expected}")
     print(f"strict ranking achieved       : {order == expected}")

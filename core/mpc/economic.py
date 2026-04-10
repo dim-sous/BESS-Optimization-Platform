@@ -1,8 +1,10 @@
-"""Economic MPC.
+"""Economic MPC — unified formulation.
 
-Profit-maximising NLP with a soft terminal SOC anchor against the EMS
-plan. The MPC sees forecast prices (probability-weighted forecast mean,
-never realized) and trades arbitrage profit against degradation cost.
+Profit-maximising NLP with per-step SOC tracking + terminal anchor
+against the EMS plan. The MPC sees forecast prices (probability-weighted
+forecast mean, never realized) and trades arbitrage profit against
+degradation cost, while tracking the EMS SOC trajectory to ensure the
+planner's inter-hour arbitrage schedule is executed.
 
 Design points:
 
@@ -14,9 +16,12 @@ Design points:
   process is symmetric around zero), so there is no SOC pre-positioning
   term and no expected delivery payment in the cost (constant w.r.t.
   the decision variables).
-- No per-step SOC anchor — the EMS pins end-of-hour SOC, not an in-hour
-  trajectory. Cross-hour alignment is handled exclusively by the
-  terminal anchor `Q_terminal_econ · (SOC[N] − soc_ref[N])²`.
+- Per-step SOC tracking (`Q_soc`) ensures the EMS arbitrage plan is
+  executed. The price term allows profitable intra-hour deviations when
+  the price signal is strong enough to outweigh the tracking cost.
+- Endurance headroom constraint (soft) ensures SOC has room to sustain
+  committed reg power in either direction, absorbing OU activation
+  bursts.
 - Solver-failure fallback: a `TrackingMPC` instance, so the EMS plan is
   never lost.
 """
@@ -43,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class EconomicMPC:
-    """Profit-maximising MPC with terminal EMS-anchor."""
+    """Unified MPC: profit-maximising with per-step SOC tracking."""
 
     def __init__(
         self,
@@ -72,7 +77,10 @@ class EconomicMPC:
 
         # Fallback: if the economic NLP fails, fall back to a tracking
         # MPC solve so we never lose the EMS plan.
-        self._tracking_fallback = TrackingMPC(bp, tp, mp, thp, elp)
+        self._tracking_fallback = TrackingMPC(
+            bp, tp, mp, thp, elp,
+            expected_activation_frac=ep.expected_activation_frac,
+        )
 
         self._build_problem()
 
@@ -97,12 +105,13 @@ class EconomicMPC:
         TEMP = opti.variable(N + 1)
         eps = opti.variable(N + 1)
         eps_temp = opti.variable(N + 1)
+        eps_endurance = opti.variable(N + 1)
 
         # ---- Parameters (set each solve) ----
         soc_0 = opti.parameter()
         soh_p = opti.parameter()
         temp_0 = opti.parameter()
-        soc_ref_p = opti.parameter(N + 1)             # only soc_ref_p[N] enters cost
+        soc_ref_p = opti.parameter(N + 1)             # per-step SOC tracking + terminal
         u_prev_p = opti.parameter(2)                  # last [P_chg, P_dis]
         price_e_p = opti.parameter(N)                 # forecast $/kWh per step
         p_reg_committed_p = opti.parameter(N)         # ZOH from EMS plan, magnitude ≥0
@@ -110,6 +119,7 @@ class EconomicMPC:
         # ---- 2-state integrator with SOH parameter ----
         F_mpc = _build_2state_integrator(
             bp, thp, self.elp, self.tp.dt_mpc, soh_p,
+            expected_activation_frac=self.ep.expected_activation_frac,
         )
 
         opti.subject_to(SOC[0] == soc_0)
@@ -132,6 +142,9 @@ class EconomicMPC:
             opti.subject_to(SOC[k + 1] == x2_next[0])
             opti.subject_to(TEMP[k + 1] == x2_next[1])
 
+            # Per-step SOC tracking — execute the EMS arbitrage schedule
+            cost += mp.Q_soc * (SOC[k] - soc_ref_p[k]) ** 2
+
             # Energy arbitrage profit (negative cost = profit)
             cost += -price_e_p[k] * (P_dis[j] - P_chg[j]) * dt_h
 
@@ -141,10 +154,6 @@ class EconomicMPC:
             # report still accounts for it).
             P_arb = P_chg[j] + P_dis[j]
             cost += ep.degradation_cost * bp.alpha_deg * P_arb * dt_s
-
-            # NO per-step SOC anchor. Intra-hour SOC trajectory is fiction
-            # (the EMS pins end-of-hour SOC only). Cross-hour alignment
-            # falls entirely on the terminal anchor below.
 
             # Rate-of-change penalty (smoothness)
             if k == 0:
@@ -158,13 +167,14 @@ class EconomicMPC:
                     + (P_dis[k] - P_dis[k - 1]) ** 2
                 )
 
-        # Terminal anchor (cross-hour alignment with EMS plan)
-        cost += mp.Q_terminal_econ * (SOC[N] - soc_ref_p[N]) ** 2
+        # Terminal SOC anchor
+        cost += mp.Q_terminal * (SOC[N] - soc_ref_p[N]) ** 2
 
         # Slack penalties
         for k in range(N + 1):
             cost += mp.slack_penalty * eps[k] ** 2
             cost += mp.slack_penalty_temp * eps_temp[k] ** 2
+            cost += mp.slack_penalty_endurance * eps_endurance[k] ** 2
 
         opti.minimize(cost)
 
@@ -173,6 +183,7 @@ class EconomicMPC:
         opti.subject_to(opti.bounded(0.0, P_dis, bp.P_max_kw))
         opti.subject_to(eps >= 0)
         opti.subject_to(eps_temp >= 0)
+        opti.subject_to(eps_endurance >= 0)
 
         for k in range(N + 1):
             opti.subject_to(SOC[k] >= bp.SOC_min - eps[k])
@@ -192,6 +203,26 @@ class EconomicMPC:
             opti.subject_to(P_chg[j] + p_reg_committed_p[k] <= bp.P_max_kw)
             opti.subject_to(P_dis[j] + p_reg_committed_p[k] <= bp.P_max_kw)
 
+        # Endurance headroom: at every predicted step the SOC must have
+        # room to sustain the committed P_reg for endurance_hours_mpc in
+        # either direction (up-reg discharge / down-reg charge). Soft.
+        t_end = mp.endurance_hours_mpc
+        for k in range(N + 1):
+            kp = min(k, N - 1)
+            margin_low = (
+                p_reg_committed_p[kp] * t_end
+                / (bp.E_nom_kwh * bp.eta_discharge)
+            )
+            margin_high = (
+                p_reg_committed_p[kp] * t_end * bp.eta_charge / bp.E_nom_kwh
+            )
+            opti.subject_to(
+                SOC[k] >= bp.SOC_min + margin_low - eps_endurance[k]
+            )
+            opti.subject_to(
+                SOC[k] <= bp.SOC_max - margin_high + eps_endurance[k]
+            )
+
         opti.solver("ipopt", ipopt_opts())
 
         # ---- Store handles ----
@@ -202,6 +233,7 @@ class EconomicMPC:
         self._TEMP = TEMP
         self._eps = eps
         self._eps_temp = eps_temp
+        self._eps_endurance = eps_endurance
         self._soc_0 = soc_0
         self._soh_p = soh_p
         self._temp_0 = temp_0
@@ -230,11 +262,10 @@ class EconomicMPC:
         ----------
         x_est                    : ndarray (>=3,) EKF estimate. Layout
                                    assumed `[SOC, SOH, T, ...]`.
-        soc_ref                  : ndarray (N+1,) — only `soc_ref[N]`
-                                   enters the cost (terminal anchor);
-                                   the full vector seeds the SOC
-                                   warm-start and is forwarded to the
-                                   tracking fallback.
+        soc_ref                  : ndarray (N+1,) per-step SOC tracking
+                                   reference from the EMS plan. All
+                                   entries enter the cost (per-step
+                                   Q_soc + terminal Q_terminal).
         p_chg_ref/p_dis_ref      : ndarray (N,) — fallback only.
         price_e_horizon          : ndarray (N,) forecast energy price ZOH [$/kWh]
         p_reg_committed_horizon  : ndarray (N,) committed FCR power ZOH
@@ -297,6 +328,7 @@ class EconomicMPC:
             opti.set_initial(self._TEMP, temp_0_val)
         opti.set_initial(self._eps, 0.0)
         opti.set_initial(self._eps_temp, 0.0)
+        opti.set_initial(self._eps_endurance, 0.0)
 
         try:
             sol = opti.solve()
