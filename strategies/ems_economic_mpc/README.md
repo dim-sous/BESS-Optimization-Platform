@@ -167,9 +167,7 @@ blocked region of the prediction.
   Penalising deviation against an invented in-hour target would fight
   the economic term for no real reason. Cross-hour alignment is
   handled exclusively by the terminal anchor `Q_terminal_econ ·
-  (SOC[N] − soc_ref[N])²`. (Audit F33 resolution: `ems_tracking_mpc`
-  fixes the per-step term by linearly interpolating between hourly
-  knots; `ems_economic_mpc` deletes it.)
+  (SOC[N] − soc_ref[N])²`.
 
 ### Empirical status (post-audit)
 

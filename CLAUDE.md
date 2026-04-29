@@ -1,13 +1,13 @@
 ## Current State
 - **Frozen versions:** v1, v2, v3, v4 live in [archive/](archive/) and **must not be modified**.
-- **Active development:** v5 (Regulation Activation & MPC Necessity) — refactored into modular `core/` (shared platform) + `strategies/` (one folder per strategy) layout. Linear simulator core; bugs A/B/C from the audit eliminated by construction.
-- **Active issues:** see [backlog.md](backlog.md) (item 0 lists the open audit findings the refactor is addressing).
-- **Historical gate reports:** [archive/gate_reports.md](archive/gate_reports.md).
+- **Active platform:** v5 (Regulation Activation & MPC Necessity) with v5b additive extension (Greek-style multi-product MILP bidding tier). Linear simulator core; per-strategy folders; pure-function ledger.
+- **Active issues / open empirical questions:** see [backlog.md](backlog.md).
+- **Historical gate reports:** [archive/gate_reports.md](archive/gate_reports.md). Most recent gate report: [results/v5b_gate_report.md](results/v5b_gate_report.md).
 
 ## If context is unclear
 Re-read this file top to bottom. Ask the user to confirm the current state.
 
-You are assisting in the development of an industry-grade battery digital twin, control, and optimization platform in Python.
+You are assisting in the development of a research-grade battery digital twin, control, and optimization platform in Python.
 
 ────────────────────────────────────────
 BEHAVIORAL PRINCIPLES
@@ -26,7 +26,7 @@ BEHAVIORAL PRINCIPLES
 8. **STICK WITH REALISM.** Model mismatch is real and the controllers must plan around it. Don't paper over physical inconsistencies — surface them and decide explicitly.
 
 ────────────────────────────────────────
-REPOSITORY LAYOUT (post-refactor)
+REPOSITORY LAYOUT
 ────────────────────────────────────────
 ```
 bess/
@@ -38,22 +38,20 @@ bess/
 ├── core/                      ← shared platform modules
 │   ├── config/                ←   parameter dataclasses
 │   ├── physics/               ←   plant, ODE, OCV
-│   ├── markets/               ←   prices, activation, revenue
-│   ├── estimators/            ←   EKF, MHE
-│   ├── planners/              ←   rule_based, deterministic_lp, stochastic_ems
+│   ├── markets/               ←   prices, activation, products, bids, clearing, imbalance
+│   ├── estimators/            ←   EKF
+│   ├── planners/              ←   rule_based, deterministic_lp, stochastic_ems, milp_bidding
 │   ├── mpc/                   ←   tracking, economic
-│   ├── pi/                    ←   regulation controller
-│   ├── accounting/            ←   pure-function ledger
-│   ├── simulator/             ←   strategy spec, traces, linear core loop
+│   ├── accounting/            ←   pure-function ledger + Greek settlement
+│   ├── simulator/             ←   strategy spec, traces, linear core loop, bidding_protocol
 │   └── visualization/
 ├── strategies/                ← one folder per strategy (recipe + README)
 │   ├── rule_based/            ← naive baseline
 │   ├── deterministic_lp/      ← commercial baseline (LP, mean-substitution)
-│   ├── ems/            ← canonical "EMS alone" (stochastic EMS, no MPC)
-│   ├── ems_tracking_mpc/      ← EMS + Tracking MPC (controlled-experiment baseline, not pitch)
-│   └── ems_economic_mpc/      ← EMS + Economic MPC (production v5 strategy)
-├── comparison/                ← strategy comparison harness
-├── presentation/              ← B2B pitch deck generator
+│   ├── ems/                   ← canonical "EMS alone" (stochastic NLP, no MPC)
+│   ├── ems_economic_mpc/      ← EMS + Economic MPC (production v5 strategy)
+│   └── greek_milp_bidding/    ← v5b additive: multi-product MILP bidding + Economic MPC
+├── comparison/                ← strategy comparison harnesses
 └── results/
 ```
 
@@ -62,18 +60,16 @@ STANDARD METRICS — compute and store after every version
 ────────────────────────────────────────
 - Control: RMSE_SOC_tracking, RMSE_power_tracking
 - Estimation: RMSE_SOC_estimation, RMSE_SOH_estimation
-- Economic: total_profit, total_degradation_cost
-- Computational: avg_mpc_solve_time, max_mpc_solve_time, estimator_solve_time
+- Economic: total_profit, total_degradation_cost (plus per-product Greek revenue when v5b bidding tier is active)
+- Computational: avg_mpc_solve_time, max_mpc_solve_time, estimator_solve_time, mip_solve_time
 - Generate comparison plots for: SOC, SOH, temperature, voltage, power, profit, solver time.
 
 ────────────────────────────────────────
 UPGRADE BACKLOG
 ────────────────────────────────────────
 Frozen (in archive/): v1 baseline · v2 thermal · v3 multi-cell pack · v4 2RC electrical
-Active: v5 Regulation Activation & MPC Necessity
-Future: v6 UKF · v7 joint state/param estimation · v8 ACADOS NMPC · v9 degradation-aware MPC · v10 stochastic forecast uncertainty · v11 delays · v12 multi-battery · v13 grid inverter · v14 market bidding
-
-The v5 refactor (`core/` + `strategies/` modularization) takes precedence over v6 work — the audit found execution-layer bugs that must be fixed by construction, not patched, before adding more capabilities.
+Done: v5 Regulation Activation & MPC Necessity · v5b Multi-product MILP bidding tier
+Future: v6 UKF · v7 joint state/param estimation · v8 ACADOS NMPC · v9 degradation-aware MPC · v10 stochastic forecast uncertainty · v11 delays · v12 multi-battery · v13 grid inverter
 
 ────────────────────────────────────────
 GOAL

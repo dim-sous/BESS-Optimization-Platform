@@ -75,6 +75,12 @@ class SimTraces:
     # EMS plan history (list of SOC reference arrays, one per EMS solve)
     ems_soc_refs: list = field(default_factory=list)
 
+    # Phase 3 (2026-04-28): bidding tier — appended to once per EMS hour
+    # ONLY when the strategy has a bidding_protocol wired. Empty for
+    # every v5 strategy; keeps existing trace shape bit-identical.
+    bid_books_per_hour: list = field(default_factory=list)
+    awards_per_hour: list = field(default_factory=list)
+
     def __post_init__(self) -> None:
         N = self.n_sim_steps
         M = self.n_mpc_steps

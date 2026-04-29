@@ -136,6 +136,26 @@ def run_simulation(
             plan = Plan.from_planner_dict(plan_dict, start_step=k)
             traces.ems_soc_refs.append(plan.soc_ref_hourly.copy())
 
+            # Phase 3: bidding tier (opt-in via strategy.bidding_protocol).
+            # Skipped entirely for v5 strategies (bidding_protocol=None),
+            # so their traces remain bit-identical to the pre-Phase-3 baseline.
+            #
+            # Single-gate-closure model: the planner emits one BidBook
+            # covering all delivery hours of the run, cleared once at
+            # k=0 (mirrors HEnEx DAM at D-1 12:00). Subsequent EMS
+            # re-solves are tactical re-planning but do NOT re-bid into
+            # the market — they tracked the same awards. This avoids
+            # over-counting bids/penalties that would happen if every
+            # rolling-horizon re-solve emitted a fresh bid book for the
+            # same delivery hours. Phase 4+ can add IDM intra-day
+            # re-bidding by emitting fresh bids only for hours not yet
+            # cleared.
+            if strategy.bidding_protocol is not None and k == 0:
+                bid_book = strategy.bidding_protocol.on_gate_closure(k, plan_dict)
+                awards = strategy.bidding_protocol.clear(bid_book)
+                traces.bid_books_per_hour.append(bid_book)
+                traces.awards_per_hour.append(awards)
+
         # 2. Per-minute: estimator + (optional) MPC
         if k % steps_per_mpc == 0:
             t0_est = time.perf_counter()
@@ -224,7 +244,7 @@ def run_simulation(
     traces.vrc2_ekf[N_mpc] = state_est[4]
 
     # ---- Accounting (pure function over the trace) ----
-    return compute_ledger(
+    result = compute_ledger(
         traces=traces,
         realized_e_prices=realized_e_prices,
         realized_r_prices=realized_r_prices,
@@ -235,3 +255,16 @@ def run_simulation(
         strategy_name=strategy.name,
         strategy_metadata=strategy.metadata,
     )
+
+    # Phase 3: per-product Greek market settlement, if bidding tier was active.
+    if strategy.bidding_protocol is not None and traces.bid_books_per_hour:
+        from core.accounting.greek_settlement import (
+            compute_greek_settlement_from_traces,
+        )
+        result["greek_settlement"] = compute_greek_settlement_from_traces(
+            traces=traces,
+            bidding_protocol=strategy.bidding_protocol,
+            tp=tp,
+        )
+
+    return result

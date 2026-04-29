@@ -56,8 +56,15 @@ class Strategy:
     dispatches them via the `_open_loop_dispatch` helper, which is now
     a trivial passthrough since the plant handles activation
     internally).
+
+    `bidding_protocol` (Phase 3, 2026-04-28): optional gate-closure
+    hook. When set, the simulator calls it after each EMS solve to
+    produce a BidBook + Awards which the ledger turns into a per-
+    product Greek settlement block. Default `None` keeps every v5
+    strategy bit-identical to its pre-Phase-3 traces.
     """
     name: str
     planner: _PlannerLike
     mpc: Optional[_MPCLike] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    bidding_protocol: Optional[Any] = None
